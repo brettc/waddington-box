@@ -103,6 +103,38 @@ def generate_rows_2(size):
             yield layer
 
 
+def move_through_row(position, momentum, row):
+    # We assume our ball has width, so the position cannot be right on the
+    # edges!
+    size = len(row)
+    if position < 1 or position >= size - 1:
+        raise ValueError("Ball position hits edge")
+
+    # Get the what's in front of the ball
+    block = row[position - 1: position + 2]
+
+    # Now the rules
+    if (block == possible_blocks[0]).all():
+        yield maybe_bounce(position, size)
+    elif (block == possible_blocks[1]).all():
+        yield maybe_bounce(position + 2, size)
+        yield maybe_bounce(position - 2, size)
+    elif (block == possible_blocks[2]).all():
+        yield maybe_bounce(position + 1, size)
+    elif (block == possible_blocks[3]).all():
+        yield maybe_bounce(position - 1, size)
+    else:
+        raise ValueError("bad layer")
+
+
+def row_to_mapping(row, possible_inputs=None):
+    # TODO: Make a mapping
+    pass
+    
+
+
+
+
 def generate_layers(size, num, layers=[]):
     # Create the generators for each layer
     off = 0
@@ -190,21 +222,21 @@ def test6():
     print dist
 
 def test7():
-    rows = [r for r in generate_rows_2(17)]
+    rows = [r for r in generate_rows_2(15)]
     k = len(rows)
-    for i in range(10):
+    for i in range(5):
         print i, k
         k = k * k
 
 def test8():
-    all = [k for k in generate_rows_2(17)]
+    all = [k for k in generate_rows_2(15)]
     mult = [all] * 5
     for layers in itertools.product(*mult):
         out1 = []
-        for finalpos in generate_paths(layers, 4):
+        for finalpos in generate_paths(layers, 3):
             out1.append(finalpos)
         out2 = []
-        for finalpos in generate_paths(layers, 12):
+        for finalpos in generate_paths(layers, 11):
             out2.append(finalpos)
         if len(out1) == 1 and len(out2) == 1:
             if out1[0] != out2[0]:
@@ -215,7 +247,7 @@ def test8():
 
 
 if __name__ == '__main__':
-    test8()
+    test7()
 
     
 
