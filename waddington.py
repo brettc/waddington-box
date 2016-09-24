@@ -1,253 +1,253 @@
 """
-
-TODO: Check the bouncing on the right wall
-
 """
 import numpy as np
 import itertools
 from getch import pause
+import enum
 
-possible_blocks = np.asarray([
-    [0, 0, 0],
-    [0, 1, 0],
-    [1, 0, 0],
-    [0, 0, 1]
-], np.int8)
+class Hit(enum.Enum):
+    open = 0
+    middle = 1
+    left = 2
+    right = 3
+
+HITS = {
+    (0, 0, 0) : Hit.open,
+    (0, 1, 0) : Hit.middle,
+    (1, 0, 0) : Hit.left,
+    (0, 0, 1) : Hit.right,
+}
+
+class Row(object):
+    def __init__(self, pins):
+        self.pins = pins
+
+    def hit_test(self, pos):
+        # We assume our ball has width, so the position cannot be right on the
+        # edges!
+        assert self.pins.shape[0] == self.pins.size
+        if pos < 1 or pos >= self.pins.size - 1:
+            raise ValueError("Bad Position")
+
+        # Get the what's in front of the ball
+        block = tuple(self.pins[pos - 1: pos + 2])
+        try:
+            hit = HITS[block]
+        except:
+            raise ValueError("Bad layer: more than one pin")
+
+        return hit
+
+    def generate_moves(self, pos):
+        hit = self.hit_test(pos)
+
+        if hit == Hit.middle:
+            # Only go in that direction if it possible
+            if pos - 2 > 0:
+                yield pos - 2
+            if pos + 2 < self.pins.size - 2:
+                yield pos + 2
+
+        elif hit == Hit.left:
+            if pos + 1 < self.pins.size - 2 :
+                yield pos + 1
+
+        elif hit == Hit.right:
+            if pos - 1 > 0:
+                yield pos - 1
+
+        else:
+            yield pos
+
+    @property
+    def mapping(self):
+        if not hasattr(self, '_mapping'):
+            self._mapping, self._output = self.generate_mapping()
+        return self._mapping
+
+    @property
+    def output(self):
+        if not hasattr(self, '_output'):
+            self._mapping, self._output = self.generate_mapping()
+        return self._output
+
+    def generate_mapping(self, positions=[]):
+        if not positions:
+            positions = range(1, self.pins.size-1)
+        mapping = {}
+        dist = {}
+        for in_p in positions:
+            out = [out_p for out_p in self.generate_moves(in_p)]
+
+            for o in out:
+                try:
+                    dist[o] += 1
+                except KeyError:
+                    dist[o] = 1
+
+            mapping[in_p] = out
+        return mapping, tuple(dist.items())
+
+    def show_moves(self, pos):
+        mapped = [p for p in self.generate_moves(pos)]
+        top = np.zeros_like(self.pins)
+        top[pos-1:pos+2] = 8
+        bot = np.zeros_like(self.pins)
+        for p in mapped:
+            bot[p-1:p+2] = 8
+        print('IDX: {}'.format(np.arange(self.pins.size)))
+        print('IN : {}'.format(top))
+        print('ROW: {}'.format(self.pins))
+        print('OUT: {}'.format(bot))
 
 
-def maybe_bounce(position, size):
-    overlap_left = position - 1
-    if overlap_left < 0:
-        return -overlap_left
-    overlap_right = position + 2 - size 
-    if overlap_right > 0:
-        return size - overlap_right - 1
+class RowFactory(object):
+    def __init__(self, size):
+        self.size = size
 
-    return position
-
-def test_maybe_bounce():
-    assert maybe_bounce(0, 3) == 1
-    assert maybe_bounce(-1, 3) == 2
-    assert maybe_bounce(2, 3) == 1
-    assert maybe_bounce(3, 3) == 0
-
-
-def move_through_layer(position, momentum, layer):
-    # We assume our ball has width, so the position cannot be right on the
-    # edges!
-    size = len(layer)
-    if position < 1 or position >= size-1:
-        raise ValueError("bad position")
-
-    # Get the what's in front of the ball
-    block = layer[position-1: position+2]
-    # print block
-    # print possible_blocks[1]
-
-    # Now the rules
-    if (block == possible_blocks[0]).all():
-        yield maybe_bounce(position, size)
-    elif (block == possible_blocks[1]).all():
-        yield maybe_bounce(position + 2, size)
-        yield maybe_bounce(position - 2, size)
-    elif (block == possible_blocks[2]).all():
-        yield maybe_bounce(position + 1, size)
-    elif (block == possible_blocks[3]).all():
-        yield maybe_bounce(position - 1, size)
-    else:
-        raise ValueError("bad layer")
-
-def generate_rows_1(size, offset=0):
-    # Pins can be offset by 0, 1 or 2
-    if offset > 3 or offset < 0:
-        raise ValueError("bad offset")
-    
-    # There is a pin every 3 holes
-    num_pins = (size - offset + 1) // 4
-    for x in range(2 ** num_pins):
-        layer = np.zeros(size, np.int8)
-        pos = offset
-        # We simply use the binary encoding of an integer to generate the
-        # combinations
-        for i in xrange(num_pins -1, -1, -1):
-            layer[pos] = (x >> i) & 1 
-            pos += 4
-        yield layer
-
-
-def is_valid_layer(layer, size):
-    # Test 1: at least size/4 pins
-    pin_count = layer.sum()
-    if pin_count < size // 4:
-        return False
-
-    # Test 2: pins stand alone, and have gaps of 3
-    for i in range(size-3):
-        window = layer[i:i+4]
-        if window.sum() > 1:
+    def is_valid_layer(self, pins):
+        # Test 1: at least size/4 pins
+        pin_count = pins.sum()
+        if pin_count < self.size // 4:
             return False
 
-    return True
+        # Test 2: pins stand alone, and have gaps of 3
+        for i in range(self.size-3):
+            window = pins[i:i+4]
+            if window.sum() > 1:
+                return False
+
+        return True
+
+    def generate_rows(self):
+        # There is a pin every 3 holes
+        for x in range(2 ** self.size):
+            pins = np.zeros(self.size, np.int8)
+            # We simply use the binary encoding of an integer to generate the
+            # combinations
+            for i in xrange(self.size -1, -1, -1):
+                pins[i] = (x >> i) & 1 
+
+            if self.is_valid_layer(pins):
+                yield Row(pins)
+
+    @property
+    def all_rows(self):
+        if not hasattr(self, '_rows'):
+            self._rows = [r for r in self.generate_rows()]
+        return self._rows
 
 
-def generate_rows_2(size):
-    # There is a pin every 3 holes
-    for x in range(2 ** size):
-        layer = np.zeros(size, np.int8)
-        # We simply use the binary encoding of an integer to generate the
-        # combinations
-        for i in xrange(size -1, -1, -1):
-            layer[i] = (x >> i) & 1 
+class ConstrainedRowFactory(object):
+    """Only generate pins around the assigned positions"""
+    def __init__(self, size, positions):
+        positions.sort()
+        for i in positions:
+            assert i > 0 and i < size
+            # Should check GAP too!
 
-        if is_valid_layer(layer, size):
-            yield layer
+        self.size = size
+        self.positions = positions
 
+    def generate_rows(self):
+        for pp in itertools.product(range(4), repeat=len(self.positions)):
+            pins = np.zeros(self.size, np.int8)
 
-def move_through_row(position, momentum, row):
-    # We assume our ball has width, so the position cannot be right on the
-    # edges!
-    size = len(row)
-    if position < 1 or position >= size - 1:
-        raise ValueError("Ball position hits edge")
+            for pos, offset in zip(self.positions, pp):
+                if offset != 0:
+                    pins[pos - 2 + offset] = 1
 
-    # Get the what's in front of the ball
-    block = row[position - 1: position + 2]
+            # assert self.is_valid_layer(pins)
+            yield Row(pins)
 
-    # Now the rules
-    if (block == possible_blocks[0]).all():
-        yield maybe_bounce(position, size)
-    elif (block == possible_blocks[1]).all():
-        yield maybe_bounce(position + 2, size)
-        yield maybe_bounce(position - 2, size)
-    elif (block == possible_blocks[2]).all():
-        yield maybe_bounce(position + 1, size)
-    elif (block == possible_blocks[3]).all():
-        yield maybe_bounce(position - 1, size)
-    else:
-        raise ValueError("bad layer")
+    @property
+    def all_rows(self):
+        if not hasattr(self, '_rows'):
+            self._rows = [r for r in self.generate_rows()]
+        return self._rows
 
 
-def row_to_mapping(row, possible_inputs=None):
-    # TODO: Make a mapping
-    pass
-    
+class Mappings(object):
+    def __init__(self, fact):
+        assert isinstance(fact, RowFactory)
+        lk = {}
+        for row in fact.generate_rows():
+            m = lk.setdefault(row.output, [])
+            m.append(row)
+
+        self.lookup = lk
+
+
+def test_moves():
+    # row = Row(np.asarray([0, 0, 0, 1, 0, 0, 0, 1], np.int8))
+    # row.show_moves(3)
+    # print(row.generate_mapping())
+    #
+    # rf = RowFactory(9)
+    # for row in rf.generate_rows():
+    #     print row.pins
+    #
+    #
+    # mm = Mappings(RowFactory(17))
+    # print len(mm.lookup)
+    # for k, v in mm.lookup.iteritems():
+    #     if len(v) > 1:
+    #         print k, len(v)
+    #
+    ff = RowFactory(17)
+    cf = ConstrainedRowFactory(17, [4, 12])
+    ffl = len(ff.all_rows)
+    cfl = len(cf.all_rows)
+    # for row in cf.generate_rows():
+    #     print row.pins
+    print cfl * (ffl ** 3)
+
+def recurse_rows(rows_of_rows, input_output, box, row_num, row_max):
+    if row_num == row_max:
+        # print '---'
+        # for row in box:
+        #     print row.pins
+        return 
+
+    rows = rows_of_rows[row_num]
+
+    for row in rows:
+        box[row_num] = row
+        if row_num + 1 < row_max:
+            input_output[row_num + 1] = 0
+
+        # Go through all the inputs and get the outputs
+        for pos, qty in enumerate(input_output[row_num]):
+            if qty:
+                for out in row.mapping[pos]:
+                    input_output[row_num + 1, out] += qty
+
+        recurse_rows(rows_of_rows, input_output, box, row_num + 1, row_max)
+
+
+def generate_boxes(rows_of_rows, pos, pin_count):
+    total_rows = len(rows_of_rows)
+    box = [None] * total_rows
+    input_output = np.zeros((total_rows + 1, pin_count), dtype=int)
+    input_output[0, pos] = 1
+    recurse_rows(rows_of_rows, input_output, box, 0, total_rows)
+    print input_output[-1]
+
+
+def test_recurse():
+    ff = RowFactory(11)
+    rows_of_rows = [ff.all_rows] * 2
+    generate_boxes(rows_of_rows, 5, 11)
 
 
 
 
-def generate_layers(size, num, layers=[]):
-    # Create the generators for each layer
-    off = 0
-    gen_all = []
-    for i in range(num):
-        gen = generate_rows_1(size, off)
-        gen_all.append(gen)
-        off = (off + 2) % 4
 
-    for layers in itertools.product(*gen_all):
-        yield layers
-
-
-def generate_paths(layers, pos, cur=0):
-    if cur == len(layers):
-        yield pos
-    else:
-        for newpos in move_through_layer(pos, 1, layers[cur]):
-            for finalpos in generate_paths(layers, newpos, cur+1):
-                yield finalpos
-
-
-def test1():
-    layer = np.zeros(5, np.int8)
-    layer[1] = 1
-    layer2 = np.roll(layer, 1)
-    layer3 = np.roll(layer2, 1)
-    print layer
-    print layer3
-    print layer2
-    for p in move_through_layer(1, 1, layer):
-        for q in move_through_layer(p, 1, layer3):
-            for r in move_through_layer(q, 1, layer2):
-                print r
-
-def test2():
-    count = 0
-    for k in generate_layers(15, 3):
-        count += 1
-    print count
-
-def test3():
-    for layers in generate_layers(12, 3):
-        print 'new-layout---'
-        for l in layers:
-            print l
-        for finalpos in generate_paths(layers, 5):
-            print finalpos
-        pause()
-
-def test4():
-    dist = dict([(i, 0) for i in range(12)])
-    for layers in generate_layers(12, 5):
-        for finalpos in generate_paths(layers, 5):
-            dist[finalpos] += 1
-    print dist
-
-def test5():
-    dist = dict([(i, 0) for i in range(7)])
-    layers = [
-        [1, 0, 0, 1, 0, 0, 1],
-        [0, 1, 0, 0, 1, 0, 0],
-        [0, 0, 1, 0, 0, 1, 0],
-    ]
-    layers = [np.asarray(l, np.int8) for l in layers]
-    for finalpos in generate_paths(layers, 3):
-        dist[finalpos] += 1
-    print dist
-
-def test6():
-    dist = dict([(i, 0) for i in range(17)])
-    all = [k for k in generate_rows_2(17)]
-    mult = [all] * 5
-    for layers in itertools.product(*mult):
-        outputs = []
-        for finalpos in generate_paths(layers, 8):
-            dist[finalpos] += 1
-            outputs.append(finalpos)
-        if len(outputs) > 7:
-            print '-------------------'
-            print outputs
-            for l in layers:
-                print l
-
-    print dist
-
-def test7():
-    rows = [r for r in generate_rows_2(15)]
-    k = len(rows)
-    for i in range(5):
-        print i, k
-        k = k * k
-
-def test8():
-    all = [k for k in generate_rows_2(15)]
-    mult = [all] * 5
-    for layers in itertools.product(*mult):
-        out1 = []
-        for finalpos in generate_paths(layers, 3):
-            out1.append(finalpos)
-        out2 = []
-        for finalpos in generate_paths(layers, 11):
-            out2.append(finalpos)
-        if len(out1) == 1 and len(out2) == 1:
-            if out1[0] != out2[0]:
-                print '-------------------'
-                print out1, out2
-                for l in layers:
-                    print l
 
 
 if __name__ == '__main__':
-    test7()
+    # test_moves()
+    test_recurse()
 
     
 
