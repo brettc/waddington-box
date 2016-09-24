@@ -2,8 +2,9 @@
 """
 import numpy as np
 import itertools
-from getch import pause
+# from getch import pause
 import enum
+import timeit
 
 class Hit(enum.Enum):
     open = 0
@@ -45,11 +46,11 @@ class Row(object):
             # Only go in that direction if it possible
             if pos - 2 > 0:
                 yield pos - 2
-            if pos + 2 < self.pins.size - 2:
+            if pos + 2 < self.pins.size - 1:
                 yield pos + 2
 
         elif hit == Hit.left:
-            if pos + 1 < self.pins.size - 2 :
+            if pos + 1 < self.pins.size - 1 :
                 yield pos + 1
 
         elif hit == Hit.right:
@@ -202,7 +203,8 @@ def test_moves():
     #     print row.pins
     print cfl * (ffl ** 3)
 
-def recurse_rows(rows_of_rows, input_output, box, row_num, row_max):
+
+def recurse_rows(rows_of_rows, input_output, box, row_num, row_max, pin_count):
     if row_num == row_max:
         # print '---'
         # for row in box:
@@ -210,44 +212,77 @@ def recurse_rows(rows_of_rows, input_output, box, row_num, row_max):
         return 
 
     rows = rows_of_rows[row_num]
+    inp = input_output[row_num]
+    out = input_output[row_num + 1]
 
     for row in rows:
         box[row_num] = row
         if row_num + 1 < row_max:
-            input_output[row_num + 1] = 0
+            out[:] = 0
 
-        # Go through all the inputs and get the outputs
-        for pos, qty in enumerate(input_output[row_num]):
+        # Go through all the inputs and get the outputs. Only look at possible
+        # positions (not edges)
+        pos = 1
+        while pos < pin_count - 1:
+            qty = inp[pos]
             if qty:
-                for out in row.mapping[pos]:
-                    input_output[row_num + 1, out] += qty
+                for opos in row.mapping[pos]:
+                    out[opos] += qty
+            pos += 1
 
-        recurse_rows(rows_of_rows, input_output, box, row_num + 1, row_max)
+        recurse_rows(rows_of_rows, input_output, box, row_num + 1, row_max, pin_count)
 
 
+# Breadth first
 def generate_boxes(rows_of_rows, pos, pin_count):
     total_rows = len(rows_of_rows)
     box = [None] * total_rows
     input_output = np.zeros((total_rows + 1, pin_count), dtype=int)
     input_output[0, pos] = 1
-    recurse_rows(rows_of_rows, input_output, box, 0, total_rows)
+    recurse_rows(rows_of_rows, input_output, box, 0, total_rows, pin_count)
     print input_output[-1]
 
 
 def test_recurse():
-    ff = RowFactory(11)
-    rows_of_rows = [ff.all_rows] * 2
-    generate_boxes(rows_of_rows, 5, 11)
+    ff = RowFactory(9)
+    rows_of_rows = [ff.all_rows] * 5
+    print("Num: {}".format(len(ff.all_rows) ** 5))
+    generate_boxes(rows_of_rows, 4, 9)
 
 
+def generate_paths(rows, pos, cur=0):
+    if cur == len(rows):
+        yield pos
+    else:
+        row = rows[cur]
+        for newpos in row.mapping[pos]:
+            for finalpos in generate_paths(rows, newpos, cur+1):
+                yield finalpos
 
 
-
+def test_paths():
+    ff = RowFactory(9)
+    dist = np.zeros(9, dtype=int)
+    rows_of_rows = [ff.all_rows] * 5
+    for layers in itertools.product(*rows_of_rows):
+        # outputs = []
+        for finalpos in generate_paths(layers, 4):
+            dist[finalpos] += 1
+    print dist
 
 
 if __name__ == '__main__':
+    t = test_recurse
+    print timeit.Timer(stmt="test_recurse()",
+                       setup="from __main__ import test_recurse",
+                       ).timeit(1)
+    print timeit.Timer(stmt="test_paths()",
+                       setup="from __main__ import test_paths",
+                       ).timeit(1)
+    # imeit.repeat(stmt='pass', setup='pass', timer=<default timer>, repeat=3, number=10)
     # test_moves()
-    test_recurse()
+    # test_recurse()
+    # test_paths()
 
     
 
