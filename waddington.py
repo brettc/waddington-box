@@ -22,17 +22,25 @@ HITS = {
 class Row(object):
     def __init__(self, row_id, pins):
         self.row_id = row_id
-        self.pins = pins
+        self.pins = np.asarray(pins, dtype=np.int8)
+        m = {}
+        for p in range(self.pins.size):
+            m[p] = self.moves(p)
+        self.mapping = m
 
     def hit_test(self, pos):
-        # We assume our ball has width, so the position cannot be right on the
-        # edges!
+        # position must be line up with pins
         assert self.pins.shape[0] == self.pins.size
-        if pos < 1 or pos >= self.pins.size - 1:
+        if pos < 0 or pos >= self.pins.size:
             raise ValueError("Bad Position")
 
-        # Get the what's in front of the ball
-        block = tuple(self.pins[pos - 1: pos + 2])
+        # Get the what's in front of the ball, adjusting for edge conditions.
+        block = (
+            self.pins[pos - 1] if pos > 0 else 0,
+            self.pins[pos],
+            self.pins[pos + 1] if pos < self.pins.size - 1 else 0
+        )
+
         try:
             hit = HITS[block]
         except:
@@ -40,87 +48,125 @@ class Row(object):
 
         return hit
 
-    def generate_moves(self, pos):
+    def moves(self, pos):
         hit = self.hit_test(pos)
+        moves = []
 
         def legal_move(p):
-            return p > 0 and p < self.pins.size - 1
+            return p >= 0 and p < self.pins.size
 
         if hit == Hit.middle:
-            # Only go in that direction if it possible
-            newpos = pos - 2
-            if legal_move(newpos):
-                yield newpos
+            # If we're hit in the middle, we have to move 2 spaces to go
+            # around the pin. Either way is possible (equal chance).
+            left_ok = legal_move(pos - 2)
+            rght_ok = legal_move(pos + 2)
 
-            newpos = pos + 2
-            if legal_move(newpos):
-                yield newpos
+            if left_ok and rght_ok:
+                moves.append((pos - 2, .5))
+                moves.append((pos + 2, .5))
+            elif left_ok:
+                moves.append((pos - 2, 1.0))
+            else:
+                moves.append((pos + 2, 1.0))
 
         elif hit == Hit.left:
+            # Hit on the left, we just need to move one space. It is possible
+            # that we're on the edge though -- then we "bounce" and go the
+            # other way.
             newpos = pos + 1
             if legal_move(newpos):
-                yield newpos
+                moves.append((newpos, 1.0))
             else:
                 assert legal_move(pos - 3)
-                yield pos - 3
+                moves.append((pos - 3, 1.0))
 
         elif hit == Hit.right:
+            # Opposite of above.
             newpos = pos - 1
             if legal_move(newpos):
-                yield newpos
+                moves.append((newpos, 1.0))
             else:
                 assert legal_move(pos + 3)
-                yield pos + 3
+                moves.append((pos + 3, 1.0))
 
         else:
-            yield pos
+            # Fall through
+            moves.append((pos, 1.0))
 
-    @property
-    def mapping(self):
-        if not hasattr(self, '_mapping'):
-            self._mapping, self._output = self.generate_mapping()
-        return self._mapping
+        return tuple(moves)
 
-    @property
-    def output(self):
-        if not hasattr(self, '_output'):
-            self._mapping, self._output = self.generate_mapping()
-        return self._output
+    # def show_moves(self, pos):
+    #     mapped = [p for p in self.generate_moves(pos)]
+    #     top = np.zeros_like(self.pins)
+    #     top[pos-1:pos+2] = 8
+    #     bot = np.zeros_like(self.pins)
+    #     for p in mapped:
+    #         bot[p-1:p+2] = 8
+    #     print('IDX: {}'.format(np.arange(self.pins.size)))
+    #     print('IN : {}'.format(top))
+    #     print('ROW: {}'.format(self.pins))
+    #     print('OUT: {}'.format(bot))
 
-    def generate_mapping(self, positions=[]):
-        """A dictionary that describes all of the possible i/o mappings
-        
-        A row maps inputs at pin positions to possibly multiple pin output
-        positions.
-        """
-        if not positions:
-            positions = range(1, self.pins.size-1)
-        mapping = {}
-        dist = {}
-        for in_p in positions:
-            out = [out_p for out_p in self.generate_moves(in_p)]
 
-            for o in out:
-                try:
-                    dist[o] += 1
-                except KeyError:
-                    dist[o] = 1
+def test_rows():
+    # Left Edge
+    row = Row(0, [1, 0, 0, 0, 0])
+    assert row.hit_test(0) == Hit.middle
+    assert row.mapping[0] == ((2, 1.0),)
 
-            mapping[in_p] = out
-        return mapping, tuple(dist.items())
+    assert row.hit_test(1) == Hit.left
+    assert row.mapping[0] == ((2, 1.0),)
 
-    def show_moves(self, pos):
-        mapped = [p for p in self.generate_moves(pos)]
-        top = np.zeros_like(self.pins)
-        top[pos-1:pos+2] = 8
-        bot = np.zeros_like(self.pins)
-        for p in mapped:
-            bot[p-1:p+2] = 8
-        print('IDX: {}'.format(np.arange(self.pins.size)))
-        print('IN : {}'.format(top))
-        print('ROW: {}'.format(self.pins))
-        print('OUT: {}'.format(bot))
+    # Left Edge 2
+    row = Row(0, [0, 1, 0, 0, 0])
+    assert row.hit_test(0) == Hit.right
+    assert row.mapping[0] == ((3, 1.0),)
 
+    assert row.hit_test(1) == Hit.middle
+    assert row.mapping[1] == ((3, 1.0),)
+
+    assert row.hit_test(2) == Hit.left
+    assert row.mapping[2] == ((3, 1.0),)
+
+    # Left Edge 3
+    row = Row(0, [0, 0, 1, 0, 0])
+    assert row.hit_test(1) == Hit.right
+    assert row.mapping[1] == ((0, 1.0),)
+
+    # Right edge
+    row = Row(0, [0, 0, 0, 1])
+    assert row.hit_test(2) == Hit.right
+    assert row.mapping[2] == ((1, 1.0),)
+
+    assert row.hit_test(3) == Hit.middle
+    assert row.mapping[3] == ((1, 1.0),)
+
+    # Right edge 2
+    row = Row(0, [0, 0, 0, 1, 0])
+    assert row.hit_test(2) == Hit.right
+    assert row.mapping[2] == ((1, 1.0),)
+
+    assert row.hit_test(3) == Hit.middle
+    assert row.mapping[3] == ((1, 1.0),)
+
+    assert row.hit_test(4) == Hit.left
+    assert row.mapping[4] == ((1, 1.0),)
+
+    # Right Edge 3
+    row = Row(0, [0, 0, 1, 0, 0])
+    assert row.hit_test(3) == Hit.left
+    assert row.mapping[3] == ((4, 1.0),)
+
+    # Both sides
+    row = Row(0, [0, 0, 0, 1, 0, 0, 0])
+    assert row.hit_test(2) == Hit.right
+    assert row.mapping[2] == ((1, 1.0),)
+
+    assert row.hit_test(3) == Hit.middle
+    assert row.mapping[3] == ((1, 0.5),(5, 0.5))
+
+    assert row.hit_test(4) == Hit.left
+    assert row.mapping[4] == ((5, 1.0),)
 
 
 class RowFactory(object):
@@ -200,7 +246,7 @@ class BucketsRow(object):
         self.pin_count = pin_count
         self.bucket_count = len(groups)
 
-        # Some sanity checking
+        # Some sanity checking. All pins must be there.
         all_pins = set()
         for grp in groups:
             for p in grp:
@@ -209,46 +255,58 @@ class BucketsRow(object):
         assert set(range(pin_count)) == all_pins
 
         # Ok, now generate the bucket mapping
-        self.mapping = {}
+        map_a = {}
         for g_i, grp in enumerate(groups):
             for p in grp:
-                outs = self.mapping.setdefault(p, [])
+                outs = map_a.setdefault(p, [])
                 outs.append(g_i)
 
+        # Right, now go through and set the probabilities
+        map_b = {}
+        for p_in, p_outs in map_a.items():
+            prob = 1.0 / len(p_outs)
+            map_b[p_in] = tuple([(p, prob) for p in p_outs])
+
+        self.mapping = map_b
+
+        # TODO: This is rubbish
         self.pins = groups
         
 
 class WaddingtonBox(object):
-    def __init__(self):
-        self.rows_of_variants = []
-        self.pin_count = None
-        self.bucket_count = None
+    def __init__(self, rv):
+        self.rows_of_variants = rv
+        # self.pin_count = rv[0].pins.size
+        # TODO: Make sure the last one is a bucket
+        # self.bucket_count = rv[-1][0].pins.size
+        self.bucket_count = rv[-1][0].bucket_count
 
-    def generate_paths(self, rows, pos, cur=0):
+    def generate_paths(self, rows, pos, prob, cur=0):
         """A recursive generator that traces the path through each layer"""
         if cur == len(rows):
-            yield pos
+            yield pos, prob
         else:
             row = rows[cur]
-            for newpos in row.mapping[pos]:
-                for finalpos in self.generate_paths(rows, newpos, cur+1):
-                    yield finalpos
+            for newpos, newpr in row.mapping[pos]:
+                for final_pos, final_pr in self.generate_paths(
+                        rows, newpos, prob * newpr, cur+1):
+                    yield final_pos, final_pr
 
     def generate_distributions(self, positions):
         """Generate all distributions for every possible combination of rows"""
         buckets = np.zeros((len(positions), self.bucket_count), np.double)
 
-        for rows in itertools.product(*self.rows_of_variants):
-            # rows contains one combination of possible rows. Now we just
+        for layout in itertools.product(*self.rows_of_variants):
+            # layout contains one combination of possible rows. Now we just
             # trace the paths through it.
             buckets[:, :] = 0.0
             for i, pos in enumerate(positions):
-                for finalpos in self.generate_paths(rows, pos):
-                    buckets[i, finalpos] += 1.0
+                for final_pos, final_pr in self.generate_paths(layout, pos, 1.0):
+                    buckets[i, final_pos] += final_pr
 
                 buckets[i] /= buckets[i].sum()
 
-            yield rows, buckets
+            yield layout, buckets
 
     def make_dtype(self, positions):
         return np.dtype([
@@ -262,7 +320,47 @@ class WaddingtonBox(object):
         rows = [self.rows_of_variants[i][j] for (i, j) in indexes]
         for r in rows:
             print r.pins
-            
+
+
+def test_waddington_box():
+    print
+    rf = RowFactory(10)
+    rv = [rf.all_rows] * 4
+    b = BucketsRow(10, [
+        (0, 1, 2, 3), 
+        (3, 4, 5, 6), 
+        (6, 7, 8, 9),
+    ])
+    rv.append([b])
+    wb = WaddingtonBox(rv)
+    map = {}
+    for layout, buckets in wb.generate_distributions([4, 5]):
+        # if buckets[0, 0] == 0.5 and buckets[1, 2] == 0.5:
+        #     for b in buckets:
+        #         print b
+        #     for r in layout:
+        #         print r.pins
+        #     break
+
+        dist = tuple(buckets.ravel())
+        all = map.setdefault(dist, [])
+        all.append(layout)
+
+    print len(map)
+
+    v = [len(v) for v in map.values()]
+    m = min(v)
+    print 'min', m
+    for k, v in map.items():
+        if len(v) == m:
+            print '----'
+            print k
+            # for l in v:
+            #     print
+            #     for r in l:
+            #         print r.pins
+            #     print '-'
+
 
 class WaddingtonBox_4x9(WaddingtonBox):
     def __init__(self):
