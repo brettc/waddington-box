@@ -4,7 +4,7 @@ import numpy as np
 import itertools
 # from getch import pause
 import enum
-import timeit
+import tables
 
 class Hit(enum.Enum):
     open = 0
@@ -20,7 +20,8 @@ HITS = {
 }
 
 class Row(object):
-    def __init__(self, pins):
+    def __init__(self, row_id, pins):
+        self.row_id = row_id
         self.pins = pins
 
     def hit_test(self, pos):
@@ -42,20 +43,34 @@ class Row(object):
     def generate_moves(self, pos):
         hit = self.hit_test(pos)
 
+        def legal_move(p):
+            return p > 0 and p < self.pins.size - 1
+
         if hit == Hit.middle:
             # Only go in that direction if it possible
-            if pos - 2 > 0:
-                yield pos - 2
-            if pos + 2 < self.pins.size - 1:
-                yield pos + 2
+            newpos = pos - 2
+            if legal_move(newpos):
+                yield newpos
+
+            newpos = pos + 2
+            if legal_move(newpos):
+                yield newpos
 
         elif hit == Hit.left:
-            if pos + 1 < self.pins.size - 1 :
-                yield pos + 1
+            newpos = pos + 1
+            if legal_move(newpos):
+                yield newpos
+            else:
+                assert legal_move(pos - 3)
+                yield pos - 3
 
         elif hit == Hit.right:
-            if pos - 1 > 0:
-                yield pos - 1
+            newpos = pos - 1
+            if legal_move(newpos):
+                yield newpos
+            else:
+                assert legal_move(pos + 3)
+                yield pos + 3
 
         else:
             yield pos
@@ -73,6 +88,11 @@ class Row(object):
         return self._output
 
     def generate_mapping(self, positions=[]):
+        """A dictionary that describes all of the possible i/o mappings
+        
+        A row maps inputs at pin positions to possibly multiple pin output
+        positions.
+        """
         if not positions:
             positions = range(1, self.pins.size-1)
         mapping = {}
@@ -122,6 +142,7 @@ class RowFactory(object):
 
     def generate_rows(self):
         # There is a pin every 3 holes
+        row_id = 0
         for x in range(2 ** self.size):
             pins = np.zeros(self.size, np.int8)
             # We simply use the binary encoding of an integer to generate the
@@ -130,7 +151,8 @@ class RowFactory(object):
                 pins[i] = (x >> i) & 1 
 
             if self.is_valid_layer(pins):
-                yield Row(pins)
+                yield Row(row_id, pins)
+                row_id += 1
 
     @property
     def all_rows(self):
@@ -151,6 +173,7 @@ class ConstrainedRowFactory(object):
         self.positions = positions
 
     def generate_rows(self):
+        row_id = 0
         for pp in itertools.product(range(4), repeat=len(self.positions)):
             pins = np.zeros(self.size, np.int8)
 
@@ -160,6 +183,7 @@ class ConstrainedRowFactory(object):
 
             # assert self.is_valid_layer(pins)
             yield Row(pins)
+            row_id += 1
 
     @property
     def all_rows(self):
@@ -168,15 +192,20 @@ class ConstrainedRowFactory(object):
         return self._rows
 
 
-class Mappings(object):
-    def __init__(self, fact):
-        assert isinstance(fact, RowFactory)
-        lk = {}
-        for row in fact.generate_rows():
-            m = lk.setdefault(row.output, [])
-            m.append(row)
 
-        self.lookup = lk
+class Database(object):
+    def __init__(self):
+        filters = tables.Filters(complib='blosc', complevel=5)
+        h5 = tables.open_file(str(self.path), 'w', filters=filters)
+        
+
+    def _dtype(self):
+        return np.dtype([
+            ('generation', int),
+            ('target', int),
+            ('best', float),
+            ('indexes', int, self._size),
+        ])
 
 
 def test_moves():
@@ -206,10 +235,12 @@ def test_moves():
 
 def recurse_rows(rows_of_rows, input_output, box, row_num, row_max, pin_count):
     if row_num == row_max:
-        # print '---'
-        # for row in box:
-        #     print row.pins
-        return 
+        yield box, input_output
+        return
+        # # print '---'
+        # # for row in box:
+        # #     print row.pins
+        # return 
 
     rows = rows_of_rows[row_num]
     inp = input_output[row_num]
@@ -217,8 +248,8 @@ def recurse_rows(rows_of_rows, input_output, box, row_num, row_max, pin_count):
 
     for row in rows:
         box[row_num] = row
-        if row_num + 1 < row_max:
-            out[:] = 0
+        # if row_num + 1 < row_max:
+        out[:] = 0
 
         # Go through all the inputs and get the outputs. Only look at possible
         # positions (not edges)
@@ -230,7 +261,9 @@ def recurse_rows(rows_of_rows, input_output, box, row_num, row_max, pin_count):
                     out[opos] += qty
             pos += 1
 
-        recurse_rows(rows_of_rows, input_output, box, row_num + 1, row_max, pin_count)
+        for b, io in recurse_rows(rows_of_rows, input_output, box, row_num + 1, row_max, pin_count):
+            yield b, io
+
 
 
 # Breadth first
@@ -239,15 +272,19 @@ def generate_boxes(rows_of_rows, pos, pin_count):
     box = [None] * total_rows
     input_output = np.zeros((total_rows + 1, pin_count), dtype=int)
     input_output[0, pos] = 1
-    recurse_rows(rows_of_rows, input_output, box, 0, total_rows, pin_count)
+    for b, io in recurse_rows(rows_of_rows, input_output, box, 0, total_rows, pin_count):
+        yield b, io
     print input_output[-1]
 
 
 def test_recurse():
     ff = RowFactory(9)
-    rows_of_rows = [ff.all_rows] * 5
-    print("Num: {}".format(len(ff.all_rows) ** 5))
-    generate_boxes(rows_of_rows, 4, 9)
+    rows_of_rows = [ff.all_rows] * 4
+    print("Num: {}".format(len(ff.all_rows) ** 4))
+    dist = np.zeros(9, int)
+    for b, io in generate_boxes(rows_of_rows, 4, 9):
+        dist += io[-1]
+    print dist
 
 
 def generate_paths(rows, pos, cur=0):
@@ -263,24 +300,24 @@ def generate_paths(rows, pos, cur=0):
 def test_paths():
     ff = RowFactory(9)
     dist = np.zeros(9, dtype=int)
-    rows_of_rows = [ff.all_rows] * 5
-    for layers in itertools.product(*rows_of_rows):
+    rows_of_rows = [ff.all_rows] * 4
+    for rows in itertools.product(*rows_of_rows):
         # outputs = []
-        for finalpos in generate_paths(layers, 4):
+        for finalpos in generate_paths(rows, 4):
             dist[finalpos] += 1
     print dist
 
 
 if __name__ == '__main__':
-    t = test_recurse
+    import timeit
+
+    # Timing
     print timeit.Timer(stmt="test_recurse()",
                        setup="from __main__ import test_recurse",
                        ).timeit(1)
     print timeit.Timer(stmt="test_paths()",
                        setup="from __main__ import test_paths",
                        ).timeit(1)
-    # imeit.repeat(stmt='pass', setup='pass', timer=<default timer>, repeat=3, number=10)
-    # test_moves()
     # test_recurse()
     # test_paths()
 
