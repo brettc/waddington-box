@@ -193,34 +193,36 @@ class ConstrainedRowFactory(object):
         return self._rows
 
 
-class FinalRow(object):
+class BucketsRow(object):
     """Maps the final row"""
+    def __init__(self, pin_count, groups):
+        self.row_id = 0
+        self.pin_count = pin_count
+        self.bucket_count = len(groups)
+
+        # Some sanity checking
+        all_pins = set()
+        for grp in groups:
+            for p in grp:
+                all_pins.add(p)
+
+        assert set(range(pin_count)) == all_pins
+
+        # Ok, now generate the bucket mapping
+        self.mapping = {}
+        for g_i, grp in enumerate(groups):
+            for p in grp:
+                outs = self.mapping.setdefault(p, [])
+                outs.append(g_i)
+
+        self.pins = groups
         
 
 class WaddingtonBox(object):
     def __init__(self):
         self.rows_of_variants = []
         self.pin_count = None
-        self.buckets = None
         self.bucket_count = None
-
-    def make_buckets(self, pin_count, groups):
-        self.pin_count = pin_count
-        self.bucket_count = len(groups)
-
-        # Some sanity checking
-        s = []
-        for gr in groups:
-            for p in gr:
-                s.append(p)
-        s.sort()
-        assert s == range(pin_count)
-
-        # Ok, now generate the bucket mapping
-        self.buckets = dict([(i, []) for i in range(len(groups))])
-        for i, gr in enumerate(groups):
-            for p in gr:
-                self.buckets[i].append(p)
 
     def generate_paths(self, rows, pos, cur=0):
         """A recursive generator that traces the path through each layer"""
@@ -232,38 +234,76 @@ class WaddingtonBox(object):
                 for finalpos in self.generate_paths(rows, newpos, cur+1):
                     yield finalpos
 
-    def generate_distributions(self, pos):
+    def generate_distributions(self, positions):
         """Generate all distributions for every possible combination of rows"""
+        buckets = np.zeros((len(positions), self.bucket_count), np.double)
+
         for rows in itertools.product(*self.rows_of_variants):
             # rows contains one combination of possible rows. Now we just
             # trace the paths through it.
-            dist = np.zeros(rows[-1].bucket_count)
-            
-            for finalpos in self.generate_paths(rows, pos):
-                dist[finalpos] += 1
-            
+            buckets[:, :] = 0.0
+            for i, pos in enumerate(positions):
+                for finalpos in self.generate_paths(rows, pos):
+                    buckets[i, finalpos] += 1.0
 
+                buckets[i] /= buckets[i].sum()
+
+            yield rows, buckets
+
+    def make_dtype(self, positions):
+        return np.dtype([
+            ('rows', int, len(self.rows_of_variants)),
+            ('dists', float, (len(positions), self.bucket_count)),
+        ])
+
+    def show(self, ids):
+        print ids
+        indexes = zip(range(len(ids)), ids)
+        rows = [self.rows_of_variants[i][j] for (i, j) in indexes]
+        for r in rows:
+            print r.pins
+            
 
 class WaddingtonBox_4x9(WaddingtonBox):
     def __init__(self):
         super(WaddingtonBox_4x9, self).__init__()
-        self.make_buckets(9, [(0, 1, 2), (3, 4, 5), (6, 7, 8)])
         rf = RowFactory(9)
+        br = BucketsRow(9, [(0, 1, 2), (3, 4, 5), (6, 7, 8)])
+        self.bucket_count = br.bucket_count
         self.rows_of_variants.extend([rf.all_rows] * 4)
+        self.rows_of_variants.append([br])
 
-# class Database(object):
-#     def __init__(self, rows, outputs):
-#         filters = tables.Filters(complib='blosc', complevel=5)
-#         self.h5 = tables.open_file(str(self.path), 'w', filters=filters)
-#         
-#
-#     def _dtype(self):
-#         return np.dtype([
-#             ('generation', int),
-#             ('target', int),
-#             ('best', float),
-#             ('indexes', int, self._size),
-#         ])
+    def write_distributions(self, fname, positions):
+        filters = tables.Filters(complib='blosc', complevel=5)
+        self.h5 = tables.open_file(fname, 'w', filters=filters)
+        dtype = self.make_dtype(positions)
+        tab = self.h5.create_table('/', 'output', dtype)
+        attrs = self.h5.root._v_attrs
+        attrs['positions'] = positions
+        row = np.zeros(1, dtype)
+        for rows, buckets in self.generate_distributions(positions):
+            rids = [r.row_id for r in rows]
+            row['rows'] = rids
+            row['dists'] = buckets
+            tab.append(row)
+
+
+def test_4x9():
+    wb = WaddingtonBox_4x9()
+    # for rows, buckets in wb.generate_distributions(4):
+    #     pass
+    #
+    # wb.write_distributions('test.h5', [2, 4])
+    #
+    h5 = tables.open_file('test.h5', 'r')
+    k = h5.root.output[:]
+    print len(k)
+    print k[99]
+    print len(wb.rows_of_variants)
+    print [len(v) for v in wb.rows_of_variants]
+
+    # print np.unravel_index(99, lens)
+    wb.show(k['rows'][99])
 
 
 def test_moves():
@@ -336,19 +376,22 @@ def generate_boxes(rows_of_rows, pos, pin_count):
 
 
 def test_recurse():
-    ff = RowFactory(9)
-    rows_of_rows = [ff.all_rows] * 4
-    print("Num: {}".format(len(ff.all_rows) ** 4))
+    ff = RowFactory(17)
+    rows_of_rows = [ff.all_rows] * 5
+    maxn = len(ff.all_rows) ** 5
+    print("Num: {}".format(len(ff.all_rows) ** 5))
     dist = np.zeros(9, int)
-    for b, io in generate_boxes(rows_of_rows, 4, 9):
+    i = 0
+    for b, io in generate_boxes(rows_of_rows, 8, 17):
+        if i % 100000 == 0:
+            print i, maxn
+        i += 1
         pass
         # dist += io[-1]
     print dist
 
 
-
-
-if __name__ == '__main__':
+def timings():
     import timeit
 
     # Timing
@@ -361,7 +404,10 @@ if __name__ == '__main__':
     # test_recurse()
     # test_paths()
 
-    
+
+if __name__ == '__main__':
+    # test_recurse()
+    test_4x9()
 
 
 
