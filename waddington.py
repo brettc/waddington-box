@@ -2,7 +2,7 @@
 """
 import numpy as np
 import itertools
-# from getch import pause
+from getch import pause
 import enum
 import tables
 
@@ -20,13 +20,30 @@ HITS = {
 }
 
 class Row(object):
-    def __init__(self, row_id, pins):
+    def __init__(self, row_id, pins, filled, minimum=False):
         self.row_id = row_id
+        self.filled = filled
+        self.minimum = minimum
         self.pins = np.asarray(pins, dtype=np.int8)
         m = {}
         for p in range(self.pins.size):
             m[p] = self.moves(p)
         self.mapping = m
+
+    def can_be_consecutive(self, other_row):
+        # It might be Buckets row...
+        if not isinstance(other_row, Row):
+            return True
+
+        # We don't want pins below other pins
+        if self.filled & other_row.filled:
+            return False
+
+        # Don't have two rows with few pins 
+        if self.minimum and other_row.minimum:
+            return False
+
+        return True
 
     def hit_test(self, pos):
         # position must be line up with pins
@@ -95,18 +112,6 @@ class Row(object):
 
         return tuple(moves)
 
-    # def show_moves(self, pos):
-    #     mapped = [p for p in self.generate_moves(pos)]
-    #     top = np.zeros_like(self.pins)
-    #     top[pos-1:pos+2] = 8
-    #     bot = np.zeros_like(self.pins)
-    #     for p in mapped:
-    #         bot[p-1:p+2] = 8
-    #     print('IDX: {}'.format(np.arange(self.pins.size)))
-    #     print('IN : {}'.format(top))
-    #     print('ROW: {}'.format(self.pins))
-    #     print('OUT: {}'.format(bot))
-
 
 def test_rows():
     # Left Edge
@@ -170,13 +175,16 @@ def test_rows():
 
 
 class RowFactory(object):
-    def __init__(self, size):
+    def __init__(self, size, few=True):
         self.size = size
+        self.minimum_pins = self.size // 4
+        if few == True:
+            self.minimum_pins -= 1
 
     def is_valid_layer(self, pins):
         # Test 1: at least size/4 pins
         pin_count = pins.sum()
-        if pin_count < self.size // 4:
+        if pin_count < self.minimum_pins:
             return False
 
         # Test 2: pins stand alone, and have gaps of 3
@@ -192,13 +200,19 @@ class RowFactory(object):
         row_id = 0
         for x in range(2 ** self.size):
             pins = np.zeros(self.size, np.int8)
+            filled = set()
+            count = 0
             # We simply use the binary encoding of an integer to generate the
             # combinations
-            for i in xrange(self.size -1, -1, -1):
-                pins[i] = (x >> i) & 1 
+            for i in xrange(self.size - 1, -1, -1):
+                if (x >> i) & 1:
+                    pins[i] = 1
+                    filled.add(i)
+                    count += 1
 
+            # Then we filter those rows we deem valid
             if self.is_valid_layer(pins):
-                yield Row(row_id, pins)
+                yield Row(row_id, pins, filled, count==self.minimum_pins)
                 row_id += 1
 
     @property
@@ -209,7 +223,10 @@ class RowFactory(object):
 
 
 class ConstrainedRowFactory(object):
-    """Only generate pins around the assigned positions"""
+    """Only generate pins around the assigned positions
+    
+    This is for the top row, as it can help reduce combinations.
+    """
     def __init__(self, size, positions):
         positions.sort()
         for i in positions:
@@ -240,7 +257,7 @@ class ConstrainedRowFactory(object):
 
 
 class BucketsRow(object):
-    """Maps the final row"""
+    """Generate the mapping for the final row that buckets the balls"""
     def __init__(self, pin_count, groups):
         self.row_id = 0
         self.pin_count = pin_count
@@ -261,7 +278,8 @@ class BucketsRow(object):
                 outs = map_a.setdefault(p, [])
                 outs.append(g_i)
 
-        # Right, now go through and set the probabilities
+        # Right, now go through and set the probabilities. We need this as
+        # some pin positions lie between the buckets.
         map_b = {}
         for p_in, p_outs in map_a.items():
             prob = 1.0 / len(p_outs)
@@ -269,17 +287,33 @@ class BucketsRow(object):
 
         self.mapping = map_b
 
-        # TODO: This is rubbish
+        # TODO: This is rubbish. Make it print something clever.
         self.pins = groups
         
 
-class WaddingtonBox(object):
-    def __init__(self, rv):
+class BoxFactory(object):
+    def __init__(self, rv, buckets=None):
         self.rows_of_variants = rv
-        # self.pin_count = rv[0].pins.size
-        # TODO: Make sure the last one is a bucket
-        # self.bucket_count = rv[-1][0].pins.size
-        self.bucket_count = rv[-1][0].bucket_count
+        self.buckets = buckets
+
+        # If we supply a bucketing row, then append it
+        if self.buckets:
+            self.output_count = self.buckets.bucket_count
+            self.rows_of_variants.append([self.buckets])
+        else:
+            self.output_count = rv[-1][0].pins.size
+
+    def generate_boxes(self):
+        for layout in itertools.product(*self.rows_of_variants):
+            row_iter = iter(layout)
+            row_now = row_iter.next()
+            for row_next in row_iter:
+                if not row_now.can_be_consecutive(row_next):
+                    break
+                row_now = row_next
+            else:
+                # If we made it all the way through, then its okay!
+                yield layout
 
     def generate_paths(self, rows, pos, prob, cur=0):
         """A recursive generator that traces the path through each layer"""
@@ -294,9 +328,9 @@ class WaddingtonBox(object):
 
     def generate_distributions(self, positions):
         """Generate all distributions for every possible combination of rows"""
-        buckets = np.zeros((len(positions), self.bucket_count), np.double)
+        buckets = np.zeros((len(positions), self.output_count), np.double)
 
-        for layout in itertools.product(*self.rows_of_variants):
+        for layout in self.generate_boxes():
             # layout contains one combination of possible rows. Now we just
             # trace the paths through it.
             buckets[:, :] = 0.0
@@ -311,7 +345,7 @@ class WaddingtonBox(object):
     def make_dtype(self, positions):
         return np.dtype([
             ('rows', int, len(self.rows_of_variants)),
-            ('dists', float, (len(positions), self.bucket_count)),
+            ('dists', float, (len(positions), self.output_count)),
         ])
 
     def show(self, ids):
@@ -322,39 +356,50 @@ class WaddingtonBox(object):
             print r.pins
 
 
+def test_generate_boxes():
+    rf = RowFactory(15, False)
+    rv = [rf.all_rows] * 4
+    bf = BoxFactory(rv)
+    all = [l for l in bf.generate_boxes()]
+    print len(all)
+    for a in all:
+        for r in a:
+            print r.pins
+        pause()
+
+
 def test_waddington_box():
     print
-    rf = RowFactory(10)
+    rf = RowFactory(11, False)
     rv = [rf.all_rows] * 4
-    b = BucketsRow(10, [
+    b = BucketsRow(11, [
         (0, 1, 2, 3), 
-        (3, 4, 5, 6), 
-        (6, 7, 8, 9),
+        (4, 5, 6), 
+        (7, 8, 9, 10),
     ])
-    rv.append([b])
-    wb = WaddingtonBox(rv)
-    map = {}
-    for layout, buckets in wb.generate_distributions([4, 5]):
-        # if buckets[0, 0] == 0.5 and buckets[1, 2] == 0.5:
-        #     for b in buckets:
-        #         print b
-        #     for r in layout:
-        #         print r.pins
-        #     break
+    wb = BoxFactory(rv, b)
+    # map = {}
+    for layout, buckets in wb.generate_distributions([0, 10]):
+        if buckets[0, 1] == 0.25 and buckets[1, 1] == 1.0:
+            for b in buckets:
+                print b
+            for r in layout:
+                print r.pins
+            break
 
-        dist = tuple(buckets.ravel())
-        all = map.setdefault(dist, [])
-        all.append(layout)
+        # dist = tuple(buckets.ravel())
+        # all = map.setdefault(dist, [])
+        # all.append(layout)
 
-    print len(map)
+    # print len(map)
 
-    v = [len(v) for v in map.values()]
-    m = min(v)
-    print 'min', m
-    for k, v in map.items():
-        if len(v) == m:
-            print '----'
-            print k
+    # v = [len(v) for v in map.values()]
+    # m = min(v)
+    # print 'min', m
+    # for k, v in map.items():
+    #     if len(v) == m:
+    #         print '----'
+    #         print k
             # for l in v:
             #     print
             #     for r in l:
@@ -362,7 +407,7 @@ def test_waddington_box():
             #     print '-'
 
 
-class WaddingtonBox_4x9(WaddingtonBox):
+class WaddingtonBox_4x9(BoxFactory):
     def __init__(self):
         super(WaddingtonBox_4x9, self).__init__()
         rf = RowFactory(9)
@@ -504,8 +549,9 @@ def timings():
 
 
 if __name__ == '__main__':
+    test_generate_boxes()
     # test_recurse()
-    test_4x9()
+    # test_4x9()
 
 
 
