@@ -20,9 +20,9 @@ HITS = {
 }
 
 class Row(object):
-    def __init__(self, row_id, pins, filled, minimum=False):
+    def __init__(self, row_id, pins, minimum=False):
         self.row_id = row_id
-        self.filled = filled
+        self.filled = set([i for i in range(pins.size) if pins[i]])
         self.minimum = minimum
         self.pins = np.asarray(pins, dtype=np.int8)
         m = {}
@@ -200,19 +200,17 @@ class RowFactory(object):
         row_id = 0
         for x in range(2 ** self.size):
             pins = np.zeros(self.size, np.int8)
-            filled = set()
             count = 0
             # We simply use the binary encoding of an integer to generate the
             # combinations
             for i in xrange(self.size - 1, -1, -1):
                 if (x >> i) & 1:
                     pins[i] = 1
-                    filled.add(i)
                     count += 1
 
             # Then we filter those rows we deem valid
             if self.is_valid_layer(pins):
-                yield Row(row_id, pins, filled, count==self.minimum_pins)
+                yield Row(row_id, pins, count==self.minimum_pins)
                 row_id += 1
 
     @property
@@ -246,7 +244,7 @@ class ConstrainedRowFactory(object):
                     pins[pos - 2 + offset] = 1
 
             # assert self.is_valid_layer(pins)
-            yield Row(pins)
+            yield Row(row_id, pins)
             row_id += 1
 
     @property
@@ -289,7 +287,7 @@ class BucketsRow(object):
 
         # TODO: This is rubbish. Make it print something clever.
         self.pins = groups
-        
+
 
 class BoxFactory(object):
     def __init__(self, rv, buckets=None):
@@ -310,248 +308,182 @@ class BoxFactory(object):
             for row_next in row_iter:
                 if not row_now.can_be_consecutive(row_next):
                     break
+
                 row_now = row_next
             else:
                 # If we made it all the way through, then its okay!
-                yield layout
+                yield Box(self, layout)
 
-    def generate_paths(self, rows, pos, prob, cur=0):
+    def construct_from_db(self, db_row):
+        ids = db_row['rows']
+        assert len(ids) == len(self.rows_of_variants)
+        indexes = zip(range(len(ids)), ids)
+        layout = [self.rows_of_variants[i][j] for (i, j) in indexes]
+        return Box(self, layout)
+
+
+class Box(object):
+    def __init__(self, factory, layout):
+        self.factory = factory
+        self.layout = layout
+
+    def _generate_paths(self, rows, pos, prob, cur=0):
         """A recursive generator that traces the path through each layer"""
         if cur == len(rows):
             yield pos, prob
         else:
             row = rows[cur]
             for newpos, newpr in row.mapping[pos]:
-                for final_pos, final_pr in self.generate_paths(
+                for final_pos, final_pr in self._generate_paths(
                         rows, newpos, prob * newpr, cur+1):
                     yield final_pos, final_pr
 
-    def generate_distributions(self, positions):
+    def get_distribution(self, positions):
         """Generate all distributions for every possible combination of rows"""
-        buckets = np.zeros((len(positions), self.output_count), np.double)
+        buckets = np.zeros((len(positions), self.factory.output_count), np.double)
 
-        for layout in self.generate_boxes():
-            # layout contains one combination of possible rows. Now we just
-            # trace the paths through it.
-            buckets[:, :] = 0.0
-            for i, pos in enumerate(positions):
-                for final_pos, final_pr in self.generate_paths(layout, pos, 1.0):
-                    buckets[i, final_pos] += final_pr
+        for i, pos in enumerate(positions):
+            for final_pos, final_pr in self._generate_paths(self.layout, pos, 1.0):
+                buckets[i, final_pos] += final_pr
 
-                buckets[i] /= buckets[i].sum()
+            buckets[i] /= buckets[i].sum()
 
-            yield layout, buckets
+        return buckets
+
+    def dump(self):
+        print '---'
+        for r in self.layout:
+            print r.pins
+            print
+        print '---'
+
+
+class Database(object):
+    def __init__(self, fname, factory, positions):
+        self.factory = factory
+        self.fname = fname
+        self.positions = positions
+        self.dtype = self.make_dtype(positions)
+
+    def save_all(self):
+        filters = tables.Filters(complib='blosc', complevel=5)
+        h5 = tables.open_file(self.fname, 'w', filters=filters)
+
+        attrs = h5.root._v_attrs
+        attrs['positions'] = self.positions
+
+        row = np.zeros(1, self.dtype)
+        table = h5.create_table('/', 'output', self.dtype)
+        cnt = 0
+        for box in self.factory.generate_boxes():
+            if cnt % 10000 == 0:
+                print 'counting', cnt
+            cnt += 1
+            dist = box.get_distribution(self.positions)
+
+            rids = [r.row_id for r in box.layout]
+            row['rows'] = rids
+            row['dist'] = dist
+            table.append(row)
+        h5.close()
+
+    def read_all(self):
+        h5 = tables.open_file(self.fname, 'r')
+        return h5.root.output[:]
 
     def make_dtype(self, positions):
         return np.dtype([
-            ('rows', int, len(self.rows_of_variants)),
-            ('dists', float, (len(positions), self.output_count)),
+            ('rows', int, len(self.factory.rows_of_variants)),
+            ('dist', float, (len(positions), self.factory.output_count)),
         ])
 
-    def show(self, ids):
-        print ids
-        indexes = zip(range(len(ids)), ids)
-        rows = [self.rows_of_variants[i][j] for (i, j) in indexes]
-        for r in rows:
-            print r.pins
 
-
-def test_generate_boxes():
+def box_15_5_a_factory():
+    # The basic box for the paper
     rf = RowFactory(15, False)
-    rv = [rf.all_rows] * 4
-    bf = BoxFactory(rv)
-    all = [l for l in bf.generate_boxes()]
-    print len(all)
-    for a in all:
-        for r in a:
-            print r.pins
-        pause()
-
-
-def test_waddington_box():
-    print
-    rf = RowFactory(11, False)
-    rv = [rf.all_rows] * 4
-    b = BucketsRow(11, [
+    rv = [rf.all_rows] * 5
+    bk = BucketsRow(15, [
         (0, 1, 2, 3), 
-        (4, 5, 6), 
-        (7, 8, 9, 10),
+        (3, 4, 5, 6, 7), 
+        (7, 8, 9, 10, 11), 
+        (11, 12, 13, 14),
     ])
-    wb = BoxFactory(rv, b)
-    # map = {}
-    for layout, buckets in wb.generate_distributions([0, 10]):
-        if buckets[0, 1] == 0.25 and buckets[1, 1] == 1.0:
-            for b in buckets:
-                print b
-            for r in layout:
-                print r.pins
-            break
-
-        # dist = tuple(buckets.ravel())
-        # all = map.setdefault(dist, [])
-        # all.append(layout)
-
-    # print len(map)
-
-    # v = [len(v) for v in map.values()]
-    # m = min(v)
-    # print 'min', m
-    # for k, v in map.items():
-    #     if len(v) == m:
-    #         print '----'
-    #         print k
-            # for l in v:
-            #     print
-            #     for r in l:
-            #         print r.pins
-            #     print '-'
+    bf = BoxFactory(rv, bk)
+    return bf
 
 
-class WaddingtonBox_4x9(BoxFactory):
-    def __init__(self):
-        super(WaddingtonBox_4x9, self).__init__()
-        rf = RowFactory(9)
-        br = BucketsRow(9, [(0, 1, 2), (3, 4, 5), (6, 7, 8)])
-        self.bucket_count = br.bucket_count
-        self.rows_of_variants.extend([rf.all_rows] * 4)
-        self.rows_of_variants.append([br])
-
-    def write_distributions(self, fname, positions):
-        filters = tables.Filters(complib='blosc', complevel=5)
-        self.h5 = tables.open_file(fname, 'w', filters=filters)
-        dtype = self.make_dtype(positions)
-        tab = self.h5.create_table('/', 'output', dtype)
-        attrs = self.h5.root._v_attrs
-        attrs['positions'] = positions
-        row = np.zeros(1, dtype)
-        for rows, buckets in self.generate_distributions(positions):
-            rids = [r.row_id for r in rows]
-            row['rows'] = rids
-            row['dists'] = buckets
-            tab.append(row)
+def save_box_15_5_a():
+    factory = box_15_5_a_factory()
+    db = Database('15_5_a.h5', factory, [3, 11])
+    db.save_all()
 
 
-def test_4x9():
-    wb = WaddingtonBox_4x9()
-    # for rows, buckets in wb.generate_distributions(4):
-    #     pass
-    #
-    # wb.write_distributions('test.h5', [2, 4])
-    #
-    h5 = tables.open_file('test.h5', 'r')
-    k = h5.root.output[:]
-    print len(k)
-    print k[99]
-    print len(wb.rows_of_variants)
-    print [len(v) for v in wb.rows_of_variants]
-
-    # print np.unravel_index(99, lens)
-    wb.show(k['rows'][99])
+def box_15_5_b_factory():
+    # The basic box for the paper
+    rf = RowFactory(15, True)
+    rv = [rf.all_rows] * 5
+    bk = BucketsRow(15, [
+        (0, 1, 2, 3), 
+        (3, 4, 5, 6, 7), 
+        (7, 8, 9, 10, 11), 
+        (11, 12, 13, 14),
+    ])
+    bf = BoxFactory(rv, bk)
+    return bf
 
 
-def test_moves():
-    # row = Row(np.asarray([0, 0, 0, 1, 0, 0, 0, 1], np.int8))
-    # row.show_moves(3)
-    # print(row.generate_mapping())
-    #
-    # rf = RowFactory(9)
-    # for row in rf.generate_rows():
-    #     print row.pins
-    #
-    #
-    # mm = Mappings(RowFactory(17))
-    # print len(mm.lookup)
-    # for k, v in mm.lookup.iteritems():
-    #     if len(v) > 1:
-    #         print k, len(v)
-    #
-    ff = RowFactory(17)
-    cf = ConstrainedRowFactory(17, [4, 12])
-    ffl = len(ff.all_rows)
-    cfl = len(cf.all_rows)
-    # for row in cf.generate_rows():
-    #     print row.pins
-    print cfl * (ffl ** 3)
+def save_box_15_5_b():
+    factory = box_15_5_a_factory()
+    db = Database('15_5_a.h5', factory, [3, 11])
+    db.save_all()
 
 
-def recurse_rows(rows_of_rows, input_output, box, row_num, row_max, pin_count):
-    if row_num == row_max:
-        yield box, input_output
-        return
-        # # print '---'
-        # # for row in box:
-        # #     print row.pins
-        # return 
-
-    rows = rows_of_rows[row_num]
-    inp = input_output[row_num]
-    out = input_output[row_num + 1]
-
-    for row in rows:
-        box[row_num] = row
-        # if row_num + 1 < row_max:
-        out[:] = 0
-
-        # Go through all the inputs and get the outputs. Only look at possible
-        # positions (not edges)
-        pos = 1
-        while pos < pin_count - 1:
-            qty = inp[pos]
-            if qty:
-                for opos in row.mapping[pos]:
-                    out[opos] += qty
-            pos += 1
-
-        for b, io in recurse_rows(rows_of_rows, input_output, box, row_num + 1, row_max, pin_count):
-            yield b, io
+def box_9_4_a_factory():
+    rf = RowFactory(9, False)
+    rv = [rf.all_rows] * 4
+    b = BucketsRow(9, [
+        (0, 1, 2), 
+        (3, 4, 5), 
+        (6, 7, 8),
+    ])
+    return BoxFactory(rv, b)
 
 
-
-# Breadth first
-def generate_boxes(rows_of_rows, pos, pin_count):
-    total_rows = len(rows_of_rows)
-    box = [None] * total_rows
-    input_output = np.zeros((total_rows + 1, pin_count), dtype=int)
-    input_output[0, pos] = 1
-    for b, io in recurse_rows(rows_of_rows, input_output, box, 0, total_rows, pin_count):
-        yield b, io
-    print input_output[-1]
-
-
-def test_recurse():
-    ff = RowFactory(17)
-    rows_of_rows = [ff.all_rows] * 5
-    maxn = len(ff.all_rows) ** 5
-    print("Num: {}".format(len(ff.all_rows) ** 5))
-    dist = np.zeros(9, int)
-    i = 0
-    for b, io in generate_boxes(rows_of_rows, 8, 17):
-        if i % 100000 == 0:
-            print i, maxn
-        i += 1
-        pass
-        # dist += io[-1]
-    print dist
+def save_test():
+    factory = box_9_4_a_factory()
+    db = Database('9_4_a.h5', factory, [4])
+    db.save_all()
+    x = db.read_all()
+    print len(x)
+    box = factory.construct_from_db(x[0])
+    print x[0]['dist']
+    box.dump()
 
 
-def timings():
-    import timeit
-
-    # Timing
-    print timeit.Timer(stmt="test_recurse()",
-                       setup="from __main__ import test_recurse",
-                       ).timeit(1)
-    print timeit.Timer(stmt="test_paths()",
-                       setup="from __main__ import test_paths",
-                       ).timeit(1)
-    # test_recurse()
-    # test_paths()
+def test_box_15_5_a():
+    factory = box_15_5_a_factory()
+    db = Database('15_5_a.h5', factory, [3, 11])
+    data = db.read_all()
+    print len(data)
+    dist = data['dist']
+    tups = set([tuple(d.ravel()) for d in dist])
+    print len(tups)
+    # print shorter
+    # print shorter[:,1,2:]
+    # print shorter[:,0,:2]
+    # short
+    # match = [[0, 0, 0, 0], [0, 0, 0, 0]]
+    # matching = (shorter == match)
+    # m = matching.sum(axis=2).sum(axis=1)
+    # ind = np.where(m==8)[0]
+    # print ind
+    # print shorter[ind[0]]
+    # print factory.construct_from_db(data[ind[0]]).dump()
 
 
 if __name__ == '__main__':
-    test_generate_boxes()
-    # test_recurse()
-    # test_4x9()
+    # save_box_15_5_a()
+    test_box_15_5_a()
 
 
 
