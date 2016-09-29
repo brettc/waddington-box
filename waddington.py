@@ -5,6 +5,11 @@ import itertools
 from getch import pause
 import enum
 import tables
+import click
+# import logging
+# logging.basicConfig()
+#
+# log = logging.getLogger("")
 
 class Hit(enum.Enum):
     open = 0
@@ -175,6 +180,14 @@ def test_rows():
 
 
 class RowFactory(object):
+    @property
+    def all_rows(self):
+        if not hasattr(self, '_rows'):
+            self._rows = [r for r in self.generate_rows()]
+        return self._rows
+
+
+class SpacedRowFactory(RowFactory):
     def __init__(self, size, few=True):
         self.size = size
         self.minimum_pins = self.size // 4
@@ -213,35 +226,30 @@ class RowFactory(object):
                 yield Row(row_id, pins, count==self.minimum_pins)
                 row_id += 1
 
-    @property
-    def all_rows(self):
-        if not hasattr(self, '_rows'):
-            self._rows = [r for r in self.generate_rows()]
-        return self._rows
 
-
-class ConstrainedRowFactory(object):
-    """Only generate pins around the assigned positions
+class TopRowFactory(RowFactory):
+    """Only generate pins around the slots where the ball is placed.
     
     This is for the top row, as it can help reduce combinations.
     """
-    def __init__(self, size, positions):
-        positions.sort()
-        for i in positions:
+    def __init__(self, size, slots):
+        slots.sort()
+        for i in slots:
             assert i > 0 and i < size
-            # Should check GAP too!
+            # TODO: Should really check GAP too!
 
         self.size = size
-        self.positions = positions
+        self.slots = slots
 
     def generate_rows(self):
         row_id = 0
-        for pp in itertools.product(range(4), repeat=len(self.positions)):
+        for pp in itertools.product(range(3), repeat=len(self.slots)):
             pins = np.zeros(self.size, np.int8)
 
-            for pos, offset in zip(self.positions, pp):
-                if offset != 0:
-                    pins[pos - 2 + offset] = 1
+            # Generate pins in all three relevant slots in front of the
+            # hole...
+            for pos, offset in zip(self.slots, pp):
+                pins[pos - 1 + offset] = 1
 
             # assert self.is_valid_layer(pins)
             yield Row(row_id, pins)
@@ -377,7 +385,7 @@ class Database(object):
         cnt = 0
         for box in self.factory.generate_boxes():
             if cnt % 10000 == 0:
-                print 'counting', cnt
+                click.echo('counting {}'.format(cnt))
             cnt += 1
             dist = box.get_distribution(self.positions)
 
@@ -400,7 +408,7 @@ class Database(object):
 
 def box_15_5_a_factory():
     # The basic box for the paper
-    rf = RowFactory(15, False)
+    rf = SpacedRowFactory(15, False)
     rv = [rf.all_rows] * 5
     bk = BucketsRow(15, [
         (0, 1, 2, 3), 
@@ -410,17 +418,10 @@ def box_15_5_a_factory():
     ])
     bf = BoxFactory(rv, bk)
     return bf
-
-
-def save_box_15_5_a():
-    factory = box_15_5_a_factory()
-    db = Database('15_5_a.h5', factory, [3, 11])
-    db.save_all()
-
 
 def box_15_5_b_factory():
     # The basic box for the paper
-    rf = RowFactory(15, True)
+    rf = SpacedRowFactory(15, True)
     rv = [rf.all_rows] * 5
     bk = BucketsRow(15, [
         (0, 1, 2, 3), 
@@ -431,15 +432,24 @@ def box_15_5_b_factory():
     bf = BoxFactory(rv, bk)
     return bf
 
-
-def save_box_15_5_b():
-    factory = box_15_5_a_factory()
-    db = Database('15_5_a.h5', factory, [3, 11])
-    db.save_all()
+def box_15_6_a_factory():
+    # The basic box for the paper
+    tf = TopRowFactory(15, [3, 11])
+    rf = SpacedRowFactory(15, False)
+    rv = [tf.all_rows]
+    rv.extend([rf.all_rows] * 5)
+    bk = BucketsRow(15, [
+        (0, 1, 2, 3), 
+        (3, 4, 5, 6, 7), 
+        (7, 8, 9, 10, 11), 
+        (11, 12, 13, 14),
+    ])
+    bf = BoxFactory(rv, bk)
+    return bf
 
 
 def box_9_4_a_factory():
-    rf = RowFactory(9, False)
+    rf = SpacedRowFactory(9, False)
     rv = [rf.all_rows] * 4
     b = BucketsRow(9, [
         (0, 1, 2), 
@@ -449,17 +459,50 @@ def box_9_4_a_factory():
     return BoxFactory(rv, b)
 
 
-def save_test():
-    factory = box_9_4_a_factory()
-    db = Database('9_4_a.h5', factory, [4])
+# ---------------------------------------------------------------------------
+# Commands below here
+#
+@click.group()
+def waddington():
+    pass
+
+@waddington.command()
+def save_box_15_5_a():
+    click.echo('Creating factory')
+    factory = box_15_5_a_factory()
+    db = Database('15_5_a.h5', factory, [3, 11])
     db.save_all()
-    x = db.read_all()
-    print len(x)
-    box = factory.construct_from_db(x[0])
-    print x[0]['dist']
-    box.dump()
 
 
+@waddington.command()
+def save_box_15_5_b():
+    click.echo('Creating factory')
+    factory = box_15_5_b_factory()
+    db = Database('15_5_b.h5', factory, [3, 11])
+    db.save_all()
+
+
+@waddington.command()
+def save_box_15_6_a():
+    click.echo('Creating factory')
+    factory = box_15_6_a_factory()
+    db = Database('15_6_a.h5', factory, [3, 11])
+    db.save_all()
+
+
+@waddington.command()
+@click.argument('rows', default=4)
+@click.argument('pins', default=15)
+@click.option('--few', is_flag=True)
+# @click.option('--top', type=int, default=0)
+def quantify(rows, pins, few, top):
+    # if top:
+    #     top = TopRowFactory(pins, 
+    rf = SpacedRowFactory(pins, few)
+    print len(rf.all_rows) ** rows
+
+
+@waddington.command()
 def test_box_15_5_a():
     factory = box_15_5_a_factory()
     db = Database('15_5_a.h5', factory, [3, 11])
@@ -479,11 +522,20 @@ def test_box_15_5_a():
     # print ind
     # print shorter[ind[0]]
     # print factory.construct_from_db(data[ind[0]]).dump()
+    
+@waddington.command()
+def test():
+    tf = TopRowFactory(15, [3, 11])
+    for row in tf.generate_rows():
+        print row.pins
+
 
 
 if __name__ == '__main__':
-    # save_box_15_5_a()
-    test_box_15_5_a()
+    waddington()
+#     save_box_15_5_b()
+#     save_box_15_5_a()
+    # test_box_15_5_a()
 
 
 
