@@ -302,24 +302,26 @@ class BucketsRow(object):
 
 class BoxFactory(object):
     def __init__(self, rv, buckets=None):
-        self.rows_of_variants = rv
+        self.possible_rows = rv
         self.buckets = buckets
 
         # If we supply a bucketing row, then append it
         if self.buckets:
             self.output_count = self.buckets.bucket_count
-            self.rows_of_variants.append([self.buckets])
+            self.possible_rows.append([self.buckets])
         else:
             self.output_count = rv[-1][0].pins.size
+
+        self.dimensions = [len(rs) for rs in self.possible_rows]
 
     def calc_maximum_boxes(self):
         # Note: doesn't account for row filtering
 
         # Don't count bucketing row
         if self.buckets:
-            rv = self.rows_of_variants[:-1]
+            rv = self.possible_rows[:-1]
         else:
-            rv = self.rows_of_variants
+            rv = self.possible_rows
 
         tot = 1
         for r in rv:
@@ -329,7 +331,7 @@ class BoxFactory(object):
 
     def generate_boxes(self):
         box_num = 0
-        for layout in itertools.product(*self.rows_of_variants):
+        for layout in itertools.product(*self.possible_rows):
             row_iter = iter(layout)
             row_now = row_iter.next()
             for row_next in row_iter:
@@ -342,18 +344,19 @@ class BoxFactory(object):
                 yield Box(self, box_num, layout)
             box_num += 1
 
-    def construct_from_db(self, db_row):
-        ids = db_row['rows']
-        assert len(ids) == len(self.rows_of_variants)
+    def from_ident(self, ident):
+        # Convert index into the dimensions in the rows
+        ids = np.unravel_index(ident, self.dimensions)
+        assert len(ids) == len(self.possible_rows)
         indexes = zip(range(len(ids)), ids)
-        layout = [self.rows_of_variants[i][j] for (i, j) in indexes]
-        return Box(self, -1, layout)
+        layout = [self.possible_rows[i][j] for (i, j) in indexes]
+        return Box(self, ident, layout)
 
 
 class Box(object):
-    def __init__(self, factory, num, layout):
+    def __init__(self, factory, ident, layout):
         self.factory = factory
-        self.num = num
+        self.ident = ident
         self.layout = layout
 
     def _generate_paths(self, rows, pos, prob, cur=0):
@@ -395,9 +398,6 @@ class Database(object):
         if os.path.exists(fname):
             if factory is not None and not overwrite:
                 raise FileExistsError("File {} already exists!".format(fname))
-                # click.echo("File {} already exists!".format(fname), err=True)
-                # click.echo("File {} already exists!".format(fname), err=True)
-                # click.FileError(fname)
 
         self.fname = fname
         if factory is None:
@@ -409,14 +409,13 @@ class Database(object):
         self.dtype = self.make_dtype()
 
     def load(self):
-        # filters = tables.Filters(complib='blosc', complevel=5)
-        h5 = tables.open_file(self.fname, 'r') #, filters=filters)
+        h5 = tables.open_file(self.fname, 'r')
         attrs = h5.root._v_attrs
         self.factory = attrs.factory
         self.positions = attrs.positions
         self.data = self.read_all()
         self.dists = self.data['dist']
-        self.ids = self.data['rows']
+        self.ids = self.data['ident']
         h5.close()
 
     def _resave_old(self):
@@ -426,7 +425,6 @@ class Database(object):
         attrs['positions'] = self.positions
         attrs['factory'] = self.factory
         
-
     def save_all(self):
         filters = tables.Filters(complib='blosc', complevel=5)
         h5 = tables.open_file(self.fname, 'w', filters=filters)
@@ -443,16 +441,14 @@ class Database(object):
         with click.progressbar(label="Boxing", length=final_box) as bar:
             for box in self.factory.generate_boxes():
                 dist = box.get_distribution(self.positions)
-
-                rids = [r.row_id for r in box.layout]
-                row['rows'] = rids
+                row['ident'] = box.ident
                 row['dist'] = dist
                 table.append(row)
 
-                boxes_done = box.num - last_box
+                boxes_done = box.ident - last_box
                 if boxes_done > 10000:
-                    bar.update(box.num - last_box)
-                    last_box = box.num
+                    bar.update(box.ident - last_box)
+                    last_box = box.ident
 
             bar.update(final_box)
 
@@ -464,7 +460,7 @@ class Database(object):
 
     def make_dtype(self):
         return np.dtype([
-            ('rows', int, len(self.factory.rows_of_variants)),
+            ('ident', int),
             ('dist', float, (len(self.positions), self.factory.output_count)),
         ])
 
@@ -582,6 +578,14 @@ def save_box_15_6_a():
     db = Database('15_6_a.h5', factory, [3, 11])
     db.save_all()
 
+@waddington.command()
+def save_box_main():
+    click.echo('Creating factory...')
+    factory = box_15_5_c_factory()
+    click.echo('Maximum Boxes = {}'.format(factory.calc_maximum_boxes()))
+    db = Database('main.h5', factory, [3, 11])
+    db.save_all()
+
 
 @waddington.command()
 @click.argument('rows', default=4)
@@ -622,22 +626,20 @@ def test_2():
     # print factory.construct_from_db(data[ind[0]]).dump()
     
 @waddington.command()
-def test():
+def analysis():
     db = Database('15_5_c.h5')
     print db.factory
     print len(db.dists)
-    print db.dists[10]
-    box = db.factory.construct_from_db(db.data[10])
-    box.dump()
 
     # with click.progressbar(db.data) as boxes:
     #     for b in boxes:
     for b in db.data:
         d = b['dist']
+        ident = b['ident']
         if d[0][0] == 1.0:
             if d[1][2] == 1.0:
                 print d
-                box = db.factory.construct_from_db(b)
+                box = db.factory.construct_from_db(ident)
                 box.dump()
         # if d[0][2] == 1.0:
         #     if d[1][2] == 1.0:
@@ -652,6 +654,16 @@ def test():
         #                 box = db.factory.construct_from_db(b)
         #                 box.dump()
             
+@waddington.command()
+def test():
+    f = box_9_4_a_factory()
+    dims = [len(rs) for rs in f.possible_rows]
+    for b in f.generate_boxes():
+        print '--'
+        print np.unravel_index(b.ident, dims)
+        print [r.row_id for r in b.layout]
+
+
 
 
     # tf = TopRowFactory(15, [3, 11], empty=False)
@@ -666,7 +678,7 @@ def test():
     # print f.calc_maximum_boxes()
     # for box in f.generate_boxes():
     #     pass
-    # print box.num
+    # print box.ident
 
 
 
