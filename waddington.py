@@ -2,7 +2,7 @@
 """
 import numpy as np
 import itertools
-from getch import pause
+import os
 import enum
 import tables
 import click
@@ -347,7 +347,7 @@ class BoxFactory(object):
         assert len(ids) == len(self.rows_of_variants)
         indexes = zip(range(len(ids)), ids)
         layout = [self.rows_of_variants[i][j] for (i, j) in indexes]
-        return Box(self, layout)
+        return Box(self, -1, layout)
 
 
 class Box(object):
@@ -386,13 +386,46 @@ class Box(object):
             print
         print '---'
 
+class FileExistsError(click.ClickException):
+    pass
 
 class Database(object):
-    def __init__(self, fname, factory, positions):
-        self.factory = factory
+    def __init__(self, fname, factory=None, positions=None,
+                 overwrite=False):
+        if os.path.exists(fname):
+            if factory is not None and not overwrite:
+                raise FileExistsError("File {} already exists!".format(fname))
+                # click.echo("File {} already exists!".format(fname), err=True)
+                # click.echo("File {} already exists!".format(fname), err=True)
+                # click.FileError(fname)
+
         self.fname = fname
-        self.positions = positions
-        self.dtype = self.make_dtype(positions)
+        if factory is None:
+            self.load()
+        else:
+            self.factory = factory
+            self.positions = positions
+
+        self.dtype = self.make_dtype()
+
+    def load(self):
+        # filters = tables.Filters(complib='blosc', complevel=5)
+        h5 = tables.open_file(self.fname, 'r') #, filters=filters)
+        attrs = h5.root._v_attrs
+        self.factory = attrs.factory
+        self.positions = attrs.positions
+        self.data = self.read_all()
+        self.dists = self.data['dist']
+        self.ids = self.data['rows']
+        h5.close()
+
+    def _resave_old(self):
+        filters = tables.Filters(complib='blosc', complevel=5)
+        h5 = tables.open_file(self.fname, 'r+', filters=filters)
+        attrs = h5.root._v_attrs
+        attrs['positions'] = self.positions
+        attrs['factory'] = self.factory
+        
 
     def save_all(self):
         filters = tables.Filters(complib='blosc', complevel=5)
@@ -400,6 +433,7 @@ class Database(object):
 
         attrs = h5.root._v_attrs
         attrs['positions'] = self.positions
+        attrs['factory'] = self.factory
 
         row = np.zeros(1, self.dtype)
         table = h5.create_table('/', 'output', self.dtype)
@@ -428,10 +462,10 @@ class Database(object):
         h5 = tables.open_file(self.fname, 'r')
         return h5.root.output[:]
 
-    def make_dtype(self, positions):
+    def make_dtype(self):
         return np.dtype([
             ('rows', int, len(self.factory.rows_of_variants)),
-            ('dist', float, (len(positions), self.factory.output_count)),
+            ('dist', float, (len(self.positions), self.factory.output_count)),
         ])
 
 
@@ -534,11 +568,11 @@ def save_box_15_5_b():
     db.save_all()
 
 @waddington.command()
-def save_box_15_5_c():
+def save_box_15_5_c(overwrite):
     click.echo('Creating factory...')
     factory = box_15_5_c_factory()
     click.echo('Maximum Boxes = {}'.format(factory.calc_maximum_boxes()))
-    db = Database('15_5_c.h5', factory, [3, 11])
+    db = Database('15_5_c.h5', factory, [3, 11], overwrite)
     db.save_all()
 
 @waddington.command()
@@ -561,16 +595,20 @@ def quantify(rows, pins, few):
     print len(rf.all_rows) ** rows
 
 
-# @waddington.command()
-def test_box_15_5_a():
+@waddington.command()
+def test_2():
     print 'here'
-    factory = box_15_5_a_factory()
-    db = Database('15_5_a.h5', factory, [3, 11])
-    data = db.read_all()
-    print len(data)
-    dist = data['dist']
-    tups = set([tuple(d.ravel()) for d in dist])
-    print len(tups)
+    # factory = box_15_5_a_factory()
+    db = Database('15_5_a.h5')
+    f = db.factory
+    print db.distributions
+    print f
+    # db._resave_old()
+    # data = db.read_all()
+    # print len(data)
+    # dist = data['dist']
+    # tups = set([tuple(d.ravel()) for d in dist])
+    # print len(tups)
     # print shorter
     # print shorter[:,1,2:]
     # print shorter[:,0,:2]
@@ -585,9 +623,40 @@ def test_box_15_5_a():
     
 @waddington.command()
 def test():
-    tf = TopRowFactory(15, [3, 11], empty=False)
-    for row in tf.generate_rows():
-        print row.pins
+    db = Database('15_5_c.h5')
+    print db.factory
+    print len(db.dists)
+    print db.dists[10]
+    box = db.factory.construct_from_db(db.data[10])
+    box.dump()
+
+    # with click.progressbar(db.data) as boxes:
+    #     for b in boxes:
+    for b in db.data:
+        d = b['dist']
+        if d[0][0] == 1.0:
+            if d[1][2] == 1.0:
+                print d
+                box = db.factory.construct_from_db(b)
+                box.dump()
+        # if d[0][2] == 1.0:
+        #     if d[1][2] == 1.0:
+        #         print d
+        #         box = db.factory.construct_from_db(b)
+        #         box.dump()
+        # if d[0][0] == 0.75:
+        #     if d[0][1] == 0.25:
+        #         if d[1][2] == 0.25:
+        #             if d[1][3] == 0.75:
+        #                 print d
+        #                 box = db.factory.construct_from_db(b)
+        #                 box.dump()
+            
+
+
+    # tf = TopRowFactory(15, [3, 11], empty=False)
+    # for row in tf.generate_rows():
+    #     print row.pins
 
     # rv = [rf.all_rows] * 5
     # f = BoxFactory(rv)
