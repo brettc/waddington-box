@@ -232,7 +232,7 @@ class TopRowFactory(RowFactory):
     
     This is for the top row, as it can help reduce combinations.
     """
-    def __init__(self, size, slots):
+    def __init__(self, size, slots, empty=True):
         slots.sort()
         for i in slots:
             assert i > 0 and i < size
@@ -240,16 +240,19 @@ class TopRowFactory(RowFactory):
 
         self.size = size
         self.slots = slots
+        self.empty = empty
 
     def generate_rows(self):
         row_id = 0
-        for pp in itertools.product(range(3), repeat=len(self.slots)):
+        pins_per_slot = 4 if self.empty else 3
+        for pp in itertools.product(range(pins_per_slot), repeat=len(self.slots)):
             pins = np.zeros(self.size, np.int8)
 
             # Generate pins in all three relevant slots in front of the
             # hole...
             for pos, offset in zip(self.slots, pp):
-                pins[pos - 1 + offset] = 1
+                if offset != 3:
+                    pins[pos - 1 + offset] = 1
 
             # assert self.is_valid_layer(pins)
             yield Row(row_id, pins)
@@ -309,7 +312,23 @@ class BoxFactory(object):
         else:
             self.output_count = rv[-1][0].pins.size
 
+    def calc_maximum_boxes(self):
+        # Note: doesn't account for row filtering
+
+        # Don't count bucketing row
+        if self.buckets:
+            rv = self.rows_of_variants[:-1]
+        else:
+            rv = self.rows_of_variants
+
+        tot = 1
+        for r in rv:
+            tot *= len(r)
+
+        return tot
+
     def generate_boxes(self):
+        box_num = 0
         for layout in itertools.product(*self.rows_of_variants):
             row_iter = iter(layout)
             row_now = row_iter.next()
@@ -320,7 +339,8 @@ class BoxFactory(object):
                 row_now = row_next
             else:
                 # If we made it all the way through, then its okay!
-                yield Box(self, layout)
+                yield Box(self, box_num, layout)
+            box_num += 1
 
     def construct_from_db(self, db_row):
         ids = db_row['rows']
@@ -331,8 +351,9 @@ class BoxFactory(object):
 
 
 class Box(object):
-    def __init__(self, factory, layout):
+    def __init__(self, factory, num, layout):
         self.factory = factory
+        self.num = num
         self.layout = layout
 
     def _generate_paths(self, rows, pos, prob, cur=0):
@@ -382,17 +403,25 @@ class Database(object):
 
         row = np.zeros(1, self.dtype)
         table = h5.create_table('/', 'output', self.dtype)
-        cnt = 0
-        for box in self.factory.generate_boxes():
-            if cnt % 10000 == 0:
-                click.echo('counting {}'.format(cnt))
-            cnt += 1
-            dist = box.get_distribution(self.positions)
 
-            rids = [r.row_id for r in box.layout]
-            row['rows'] = rids
-            row['dist'] = dist
-            table.append(row)
+        last_box = 0
+        final_box = self.factory.calc_maximum_boxes()
+        with click.progressbar(label="Boxing", length=final_box) as bar:
+            for box in self.factory.generate_boxes():
+                dist = box.get_distribution(self.positions)
+
+                rids = [r.row_id for r in box.layout]
+                row['rows'] = rids
+                row['dist'] = dist
+                table.append(row)
+
+                boxes_done = box.num - last_box
+                if boxes_done > 10000:
+                    bar.update(box.num - last_box)
+                    last_box = box.num
+
+            bar.update(final_box)
+
         h5.close()
 
     def read_all(self):
@@ -423,6 +452,21 @@ def box_15_5_b_factory():
     # The basic box for the paper
     rf = SpacedRowFactory(15, True)
     rv = [rf.all_rows] * 5
+    bk = BucketsRow(15, [
+        (0, 1, 2, 3), 
+        (3, 4, 5, 6, 7), 
+        (7, 8, 9, 10, 11), 
+        (11, 12, 13, 14),
+    ])
+    bf = BoxFactory(rv, bk)
+    return bf
+
+def box_15_5_c_factory():
+    # The basic box for the paper
+    tf = TopRowFactory(15, [3, 11])
+    rf = SpacedRowFactory(15, False)
+    rv = [tf.all_rows]
+    rv.extend([rf.all_rows] * 4)
     bk = BucketsRow(15, [
         (0, 1, 2, 3), 
         (3, 4, 5, 6, 7), 
@@ -467,11 +511,19 @@ def waddington():
     pass
 
 @waddington.command()
-def save_box_15_5_a():
+def save_box_9_4_a():
     click.echo('Creating factory')
-    factory = box_15_5_a_factory()
-    db = Database('15_5_a.h5', factory, [3, 11])
+    factory = box_9_4_a_factory()
+    db = Database('9_4_a.h5', factory, [4])
     db.save_all()
+
+@waddington.command()
+def save_box_15_5_a():
+    click.echo('Creating factory...')
+    factory = box_15_5_a_factory()
+    click.echo('Maximum Boxes = {}'.format(factory.calc_maximum_boxes()))
+    # db = Database('15_5_a.h5', factory, [3, 11])
+    # db.save_all()
 
 
 @waddington.command()
@@ -481,6 +533,13 @@ def save_box_15_5_b():
     db = Database('15_5_b.h5', factory, [3, 11])
     db.save_all()
 
+@waddington.command()
+def save_box_15_5_c():
+    click.echo('Creating factory...')
+    factory = box_15_5_c_factory()
+    click.echo('Maximum Boxes = {}'.format(factory.calc_maximum_boxes()))
+    db = Database('15_5_c.h5', factory, [3, 11])
+    db.save_all()
 
 @waddington.command()
 def save_box_15_6_a():
@@ -495,15 +554,16 @@ def save_box_15_6_a():
 @click.argument('pins', default=15)
 @click.option('--few', is_flag=True)
 # @click.option('--top', type=int, default=0)
-def quantify(rows, pins, few, top):
+def quantify(rows, pins, few):
     # if top:
     #     top = TopRowFactory(pins, 
     rf = SpacedRowFactory(pins, few)
     print len(rf.all_rows) ** rows
 
 
-@waddington.command()
+# @waddington.command()
 def test_box_15_5_a():
+    print 'here'
     factory = box_15_5_a_factory()
     db = Database('15_5_a.h5', factory, [3, 11])
     data = db.read_all()
@@ -525,17 +585,28 @@ def test_box_15_5_a():
     
 @waddington.command()
 def test():
-    tf = TopRowFactory(15, [3, 11])
+    tf = TopRowFactory(15, [3, 11], empty=False)
     for row in tf.generate_rows():
         print row.pins
+
+    # rv = [rf.all_rows] * 5
+    # f = BoxFactory(rv)
+    # db = Database('test.h5', f, [5])
+    # db.save_all()
+
+    # print f.calc_maximum_boxes()
+    # for box in f.generate_boxes():
+    #     pass
+    # print box.num
 
 
 
 if __name__ == '__main__':
     waddington()
-#     save_box_15_5_b()
-#     save_box_15_5_a()
+    # test()
     # test_box_15_5_a()
+    # save_box_15_5_b()
+    # save_box_15_5_a()
 
 
 
