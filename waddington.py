@@ -447,7 +447,7 @@ class Database(object):
 
                 boxes_done = box.ident - last_box
                 if boxes_done > 10000:
-                    bar.update(box.ident - last_box)
+                    bar.update(boxes_done)
                     last_box = box.ident
 
             bar.update(final_box)
@@ -627,7 +627,7 @@ def test_2():
     
 @waddington.command()
 def analysis():
-    db = Database('15_5_c.h5')
+    db = Database('main.h5')
     print db.factory
     print len(db.dists)
 
@@ -639,7 +639,7 @@ def analysis():
         if d[0][0] == 1.0:
             if d[1][2] == 1.0:
                 print d
-                box = db.factory.construct_from_db(ident)
+                box = db.factory.from_ident(ident)
                 box.dump()
         # if d[0][2] == 1.0:
         #     if d[1][2] == 1.0:
@@ -656,13 +656,14 @@ def analysis():
             
 @waddington.command()
 def test():
-    f = box_9_4_a_factory()
-    dims = [len(rs) for rs in f.possible_rows]
-    for b in f.generate_boxes():
-        print '--'
-        print np.unravel_index(b.ident, dims)
-        print [r.row_id for r in b.layout]
-
+    db = Database('main.h5')
+    # tups = dict([tuple(d.ravel()) for d in db.dists))
+    # dims = [len(rs) for rs in f.possible_rows]
+    # for b in f.generate_boxes():
+    #     print '--'
+    #     print np.unravel_index(b.ident, dims)
+    #     print [r.row_id for r in b.layout]
+    #
 
 
 
