@@ -413,9 +413,33 @@ class Database(object):
         attrs = h5.root._v_attrs
         self.factory = attrs.factory
         self.positions = attrs.positions
-        self.data = self.read_all()
+        self.data = h5.root.output[:]
         self.dists = self.data['dist']
         self.ids = self.data['ident']
+
+        if hasattr(h5.root, 'mapping'):
+            self.mapping = h5.root.mapping[:]
+        h5.close()
+
+    def save_mapping(self):
+        assert hasattr(self, 'data')
+        assert not hasattr(self, 'mapping')
+
+        arr = np.zeros(len(self.data), dtype=int)
+        next_group = 1
+        group_dict = {}
+        with click.progressbar(label="Mapping", length=len(self.data)) as bar:
+            for i, dist in enumerate(self.dists):
+                flat = tuple(dist.ravel())
+                grp = group_dict.setdefault(flat, next_group)
+                if grp == next_group:
+                    next_group += 1
+                arr[i] = grp
+                bar.update(1)
+
+        h5 = tables.open_file(self.fname, 'r+')
+        # h5.remove_node('/', 'mapping')
+        h5.create_array('/', 'mapping', arr)
         h5.close()
 
     def _resave_old(self):
@@ -463,6 +487,70 @@ class Database(object):
             ('ident', int),
             ('dist', float, (len(self.positions), self.factory.output_count)),
         ])
+
+
+class Distribution(object):
+    def __init__(self, dist):
+        assert isinstance(dist, np.ndarray)
+        assert len(dist.shape) == 3
+        self.dist = dist.copy()
+
+        # First, let's make this a probability distribution assuming uniform
+        # causal distributions
+        sh = dist.shape
+        normalizer = sh[0] * sh[1]
+        self.dist /= normalizer
+        np.testing.assert_almost_equal(self.dist.sum(), 1.0)
+        self.shape = sh
+
+        self._calc_entropies()
+
+    def _calc_entropies(self):
+        # Let's calculate the entropy of the three dimensions 
+        # 0 = P (pin layouts)
+        # 1 = S (slots)
+        # 2 = B (buckets)
+        self.p_ent = np.log2(self.shape[0])
+        self.s_ent = np.log2(self.shape[1])
+
+        self.b_dist = self.dist.sum(axis=0).sum(axis=0)
+        self.b_ent = self._calc_entropy(self.b_dist)
+
+        self.p_b_dist = self.dist.sum(axis=1)
+        self.p_b_ent = self._calc_entropy(self.p_b_dist)
+
+        self.s_b_dist = self.dist.sum(axis=0)
+        self.s_b_ent = self._calc_entropy(self.s_b_dist)
+
+    #
+    # def mutual_info(self, v1, v2, v3=None):
+    #     """calculate the mutual (or conditional mutual) information.
+    #
+    #     the simplest way to do this is to calculate the entropy of various
+    #     joint distributions and bung them together. see here:
+    #
+    #     https://en.wikipedia.org/wiki/mutual_information
+    #     https://en.wikipedia.org/wiki/conditional_mutual_information
+    #     """
+    #     # Define a local variable to make it lovely and readable
+    #     h = self.entropy
+    #
+    #     # Simple version
+    #     if v3 is None:
+    #         return h(v1) + h(v2) - h(v1, v2)
+    #
+    #     # Conditional version
+    #     return h(v1, v3) + h(v2, v3) - h(v1, v2, v3) - h(v3)
+    #
+    @staticmethod
+    def _calc_entropy(arr):
+        # Extract the numpy array, and just treat it as flat. Then do the
+        # standard information calculation (base 2). Deal with zeros by simply
+        # cleaning up after.
+        q = arr.ravel()
+        log2 = -np.log2(q)
+        log2_clean = np.nan_to_num(log2)
+        return (q * log2_clean).sum()
 
 
 def box_15_5_a_factory():
@@ -654,9 +742,39 @@ def analysis():
         #                 box = db.factory.construct_from_db(b)
         #                 box.dump()
             
-@waddington.command()
+# @waddington.command()
 def test():
     db = Database('main.h5')
+    # for a, b in db.data:
+    #     print a, b
+    # db.save_mapping()
+    x = np.bincount(db.mapping)
+    k = x[1:].min()
+    # lowest = np.where(x==k)[0]
+    # ll = lowest[0]
+    # ll = x[1]
+    # idx = np.where(db.mapping == ll)[0]
+    # ii = db.ids[idx]
+    # print len(x)
+    # ii = 0
+    print db.dists[0]
+    box = db.factory.from_ident(db.ids[0])
+    box.dump()
+    #
+    # SPECIFICITY FOR THE MAPPINGS
+    amts = x[1:]
+    print amts
+    probs = amts.astype(float) / amts.sum()
+    print (probs * -np.log2(probs)).sum()
+
+
+    # d = Distribution(db.dists)
+    # print d.p_ent + d.b_ent - d.p_b_ent
+    # print d.s_ent + d.b_ent - d.s_b_ent
+    # print d.b_ent
+    # print d.s_ent
+    # print d.p_b_ent
+    # print d.p_ent
     # tups = dict([tuple(d.ravel()) for d in db.dists))
     # dims = [len(rs) for rs in f.possible_rows]
     # for b in f.generate_boxes():
@@ -684,8 +802,8 @@ def test():
 
 
 if __name__ == '__main__':
-    waddington()
-    # test()
+    # waddington()
+    test()
     # test_box_15_5_a()
     # save_box_15_5_b()
     # save_box_15_5_a()
