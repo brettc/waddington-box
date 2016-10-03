@@ -209,7 +209,6 @@ class SpacedRowFactory(RowFactory):
         return True
 
     def generate_rows(self):
-        # There is a pin every 3 holes
         row_id = 0
         for x in range(2 ** self.size):
             pins = np.zeros(self.size, np.int8)
@@ -258,12 +257,6 @@ class TopRowFactory(RowFactory):
             yield Row(row_id, pins)
             row_id += 1
 
-    @property
-    def all_rows(self):
-        if not hasattr(self, '_rows'):
-            self._rows = [r for r in self.generate_rows()]
-        return self._rows
-
 
 class BucketsRow(object):
     """Generate the mapping for the final row that buckets the balls"""
@@ -296,7 +289,8 @@ class BucketsRow(object):
 
         self.mapping = map_b
 
-        # TODO: This is rubbish. Make it print something clever.
+        # TODO: This is rubbish. But it allows us to print the pins on every
+        # row
         self.pins = groups
 
 
@@ -395,6 +389,8 @@ class FileExistsError(click.ClickException):
 class Database(object):
     def __init__(self, fname, factory=None, positions=None,
                  overwrite=False):
+        if factory is not None:
+            assert isinstance(factory, BoxFactory)
         if os.path.exists(fname):
             if factory is not None and not overwrite:
                 raise FileExistsError("File {} already exists!".format(fname))
@@ -412,6 +408,7 @@ class Database(object):
         h5 = tables.open_file(self.fname, 'r')
         attrs = h5.root._v_attrs
         self.factory = attrs.factory
+        assert isinstance(self.factory, BoxFactory)
         self.positions = attrs.positions
         self.data = h5.root.output[:]
         self.dists = self.data['dist']
@@ -437,8 +434,11 @@ class Database(object):
                 arr[i] = grp
                 bar.update(1)
 
+        # Start the groupings at 0
+        arr -= 1
+
+        # Save the mapping classes
         h5 = tables.open_file(self.fname, 'r+')
-        # h5.remove_node('/', 'mapping')
         h5.create_array('/', 'mapping', arr)
         h5.close()
 
@@ -477,10 +477,6 @@ class Database(object):
             bar.update(final_box)
 
         h5.close()
-
-    def read_all(self):
-        h5 = tables.open_file(self.fname, 'r')
-        return h5.root.output[:]
 
     def make_dtype(self):
         return np.dtype([
@@ -522,7 +518,6 @@ class Distribution(object):
         self.s_b_dist = self.dist.sum(axis=0)
         self.s_b_ent = self._calc_entropy(self.s_b_dist)
 
-    #
     # def mutual_info(self, v1, v2, v3=None):
     #     """calculate the mutual (or conditional mutual) information.
     #
@@ -542,6 +537,7 @@ class Distribution(object):
     #     # Conditional version
     #     return h(v1, v3) + h(v2, v3) - h(v1, v2, v3) - h(v3)
     #
+    
     @staticmethod
     def _calc_entropy(arr):
         # Extract the numpy array, and just treat it as flat. Then do the
@@ -716,6 +712,9 @@ def test_2():
 @waddington.command()
 def analysis():
     db = Database('main.h5')
+    db.save_mapping()
+    return 
+
     print db.factory
     print len(db.dists)
 
@@ -742,6 +741,28 @@ def analysis():
         #                 box = db.factory.construct_from_db(b)
         #                 box.dump()
             
+@waddington.command(help="Show general info about the Box")
+def describe():
+    db = Database('main.h5')
+    desc = []
+
+    # Top row + other rows
+    unconst_layouts = 2 ** (6 + (4 * 15))
+
+    map_count = len(np.unique(db.mapping))
+
+    def push(a, b):
+        desc.append((a, b))
+
+    push("Unconstrained Layouts", unconst_layouts)
+    push("Constrained Layouts", db.factory.calc_maximum_boxes())
+    push("Actual Layouts", len(db.data))
+    push("Number of Mappings", map_count)
+
+    for text, val in desc:
+        print("{0:>25}: {1:<8,}".format(text, val))
+
+
 # @waddington.command()
 def test():
     db = Database('main.h5')
@@ -749,6 +770,7 @@ def test():
     #     print a, b
     # db.save_mapping()
     x = np.bincount(db.mapping)
+    print x
     k = x[1:].min()
     # lowest = np.where(x==k)[0]
     # ll = lowest[0]
@@ -799,11 +821,60 @@ def test():
     #     pass
     # print box.ident
 
+def find_dist():
+    db = Database('main.h5')
+    find = [[0, 0, 1, 0],[0, 1, 0, 0]]
+    q = db.dists
+    x = np.where(np.all(q == find, axis=(1, 2)))[0]
+    print 'len', len(x)
+    # for a in x:
+    #     box = db.factory.from_ident(db.ids[a])
+    #     box.dump()
+        # if box.layout[0].pins.sum() != 2:
+        #     continue
+        # for row in box.layout[1:-1]:
+        #     if row.pins.sum() != 4:
+        #         break
+        # else:
+        #     print 'found'
+            # box.dump()
+            # print db.dists[a]
+
+
+    # with click.progressbar(label="Find", length=len(db.data)) as bar:
+        # for i, dist in enumerate(self.dists):
+        #     flat = tuple(dist.ravel())
+        #     grp = group_dict.setdefault(flat, next_group)
+        #     if grp == next_group:
+        #         next_group += 1
+        #     arr[i] = grp
+        #     bar.update(1)
+        
+def high_ent():
+    db = Database('main.h5')
+    q = db.dists
+    log2 = -np.log2(q)
+    log2_clean = np.nan_to_num(log2)
+    pmi = q * log2_clean
+    summed = pmi.sum(axis=(1,2))
+    mx = summed.max()
+    wh = np.where(summed == mx)[0]
+    print len(wh)
+    for a in wh:
+    # a = wh[0]
+        print db.dists[a]
+        box = db.factory.from_ident(db.ids[a])
+        box.dump()
+        break
+
+
 
 
 if __name__ == '__main__':
-    # waddington()
-    test()
+    # find_dist()
+    # high_ent()
+    waddington()
+    # test()
     # test_box_15_5_a()
     # save_box_15_5_b()
     # save_box_15_5_a()
