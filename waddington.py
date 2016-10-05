@@ -383,8 +383,28 @@ class Box(object):
             print
         print '---'
 
+    def dump_tikz(self):
+        if self.factory.buckets:
+            ll = self.layout[:-1]
+        else:
+            ll = self.layout[:]
+
+        offx = 1
+        offy = 2.5
+        beg = r"\draw[fill]"
+        end = r"circle (.1cm);"
+        
+        for i, r in enumerate(reversed(ll)):
+            for j, p in enumerate(r.pins):
+                if p:
+                    x = offx + .5 * j 
+                    y = offy + 1.5 * i
+                    print("{} ({}, {}) {}".format(beg, x, y, end))
+
+
 class FileExistsError(click.ClickException):
     pass
+
 
 class Database(object):
     def __init__(self, fname, factory=None, positions=None,
@@ -486,57 +506,77 @@ class Database(object):
 
 
 class Distribution(object):
-    def __init__(self, dist):
-        assert isinstance(dist, np.ndarray)
-        assert len(dist.shape) == 3
-        self.dist = dist.copy()
+    """Calculate some basic Info-theoretic measures on the distribution
+    
+    Note: We currently assume a uniform probability distribution across
+    everything
+    """
+    def __init__(self, db):
+        assert isinstance(db.dists, np.ndarray)
+        assert isinstance(db.mapping, np.ndarray)
+        assert len(db.dists.shape) == 3
+        self.dists = db.dists.copy()
+        self.mapping = db.mapping.copy()
 
         # First, let's make this a probability distribution assuming uniform
         # causal distributions
-        sh = dist.shape
+        sh = db.dists.shape
         normalizer = sh[0] * sh[1]
-        self.dist /= normalizer
-        np.testing.assert_almost_equal(self.dist.sum(), 1.0)
+        self.dists /= normalizer
+        np.testing.assert_almost_equal(self.dists.sum(), 1.0)
         self.shape = sh
 
-        self._calc_entropies()
+        self._calc()
+        self._calc_mapping()
 
-    def _calc_entropies(self):
+    def _calc(self):
+        """Calculating the entropies for various distributions
+        """
         # Let's calculate the entropy of the three dimensions 
         # 0 = P (pin layouts)
         # 1 = S (slots)
         # 2 = B (buckets)
+
+        # Wrap this by ignoring warnings 
+        old_err= np.seterr(divide='ignore')
+
         self.p_ent = np.log2(self.shape[0])
         self.s_ent = np.log2(self.shape[1])
 
-        self.b_dist = self.dist.sum(axis=0).sum(axis=0)
+        self.b_dist = self.dists.sum(axis=0).sum(axis=0)
         self.b_ent = self._calc_entropy(self.b_dist)
 
-        self.p_b_dist = self.dist.sum(axis=1)
+        self.p_b_dist = self.dists.sum(axis=1)
         self.p_b_ent = self._calc_entropy(self.p_b_dist)
 
-        self.s_b_dist = self.dist.sum(axis=0)
+        self.s_b_dist = self.dists.sum(axis=0)
         self.s_b_ent = self._calc_entropy(self.s_b_dist)
 
-    # def mutual_info(self, v1, v2, v3=None):
-    #     """calculate the mutual (or conditional mutual) information.
-    #
-    #     the simplest way to do this is to calculate the entropy of various
-    #     joint distributions and bung them together. see here:
-    #
-    #     https://en.wikipedia.org/wiki/mutual_information
-    #     https://en.wikipedia.org/wiki/conditional_mutual_information
-    #     """
-    #     # Define a local variable to make it lovely and readable
-    #     h = self.entropy
-    #
-    #     # Simple version
-    #     if v3 is None:
-    #         return h(v1) + h(v2) - h(v1, v2)
-    #
-    #     # Conditional version
-    #     return h(v1, v3) + h(v2, v3) - h(v1, v2, v3) - h(v3)
-    #
+        # Reset warnings
+        np.seterr(**old_err)
+
+    def _calc_mapping(self):
+        """The entropy of the mapping
+
+        Assemble all layouts with the same mapping into bins
+        Return the entropy of this (we assume a uniform dist again)
+        """
+        bins = np.bincount(self.mapping)
+        # Normalise
+        probs = bins.astype(float) / bins.sum()
+        self.p_m_spec = (probs * -np.log2(probs)).sum()
+
+    @property
+    def specificity_p_for_b(self):
+        return self.b_ent + self.p_ent - self.p_b_ent
+
+    @property
+    def specificity_s_for_b(self):
+        return self.b_ent + self.s_ent - self.s_b_ent
+
+    @property
+    def specificity_p_for_mapping(self):
+        return self.p_m_spec
     
     @staticmethod
     def _calc_entropy(arr):
@@ -544,9 +584,8 @@ class Distribution(object):
         # standard information calculation (base 2). Deal with zeros by simply
         # cleaning up after.
         q = arr.ravel()
-        log2 = -np.log2(q)
-        log2_clean = np.nan_to_num(log2)
-        return (q * log2_clean).sum()
+        log2 = np.where(q==0, 0, -np.log2(q))
+        return (q * log2).sum()
 
 
 def box_15_5_a_factory():
@@ -744,6 +783,7 @@ def analysis():
 @waddington.command(help="Show general info about the Box")
 def describe():
     db = Database('main.h5')
+    dst = Distribution(db)
     desc = []
 
     # Top row + other rows
@@ -758,68 +798,12 @@ def describe():
     push("Constrained Layouts", db.factory.calc_maximum_boxes())
     push("Actual Layouts", len(db.data))
     push("Number of Mappings", map_count)
+    push("Spec Slots for Buckets", dst.specificity_s_for_b)
+    push("Spec Pins for Buckets", dst.specificity_p_for_b)
+    push("Spec Pins for Mappings", dst.specificity_p_for_mapping)
 
     for text, val in desc:
         print("{0:>25}: {1:<8,}".format(text, val))
-
-
-# @waddington.command()
-def test():
-    db = Database('main.h5')
-    # for a, b in db.data:
-    #     print a, b
-    # db.save_mapping()
-    x = np.bincount(db.mapping)
-    print x
-    k = x[1:].min()
-    # lowest = np.where(x==k)[0]
-    # ll = lowest[0]
-    # ll = x[1]
-    # idx = np.where(db.mapping == ll)[0]
-    # ii = db.ids[idx]
-    # print len(x)
-    # ii = 0
-    print db.dists[0]
-    box = db.factory.from_ident(db.ids[0])
-    box.dump()
-    #
-    # SPECIFICITY FOR THE MAPPINGS
-    amts = x[1:]
-    print amts
-    probs = amts.astype(float) / amts.sum()
-    print (probs * -np.log2(probs)).sum()
-
-
-    # d = Distribution(db.dists)
-    # print d.p_ent + d.b_ent - d.p_b_ent
-    # print d.s_ent + d.b_ent - d.s_b_ent
-    # print d.b_ent
-    # print d.s_ent
-    # print d.p_b_ent
-    # print d.p_ent
-    # tups = dict([tuple(d.ravel()) for d in db.dists))
-    # dims = [len(rs) for rs in f.possible_rows]
-    # for b in f.generate_boxes():
-    #     print '--'
-    #     print np.unravel_index(b.ident, dims)
-    #     print [r.row_id for r in b.layout]
-    #
-
-
-
-    # tf = TopRowFactory(15, [3, 11], empty=False)
-    # for row in tf.generate_rows():
-    #     print row.pins
-
-    # rv = [rf.all_rows] * 5
-    # f = BoxFactory(rv)
-    # db = Database('test.h5', f, [5])
-    # db.save_all()
-
-    # print f.calc_maximum_boxes()
-    # for box in f.generate_boxes():
-    #     pass
-    # print box.ident
 
 def find_dist():
     db = Database('main.h5')
@@ -861,13 +845,20 @@ def high_ent():
     wh = np.where(summed == mx)[0]
     print len(wh)
     for a in wh:
-    # a = wh[0]
+        print a
         print db.dists[a]
         box = db.factory.from_ident(db.ids[a])
         box.dump()
-        break
+        box.dump_tikz()
+        print '==================='
 
 
+def big():
+    db = Database('15_6_a.h5')
+    find = [[0, 0, 1, 0],[0, 0, 0, 1]]
+    q = db.dists
+    x = np.where(np.all(q == find, axis=(1, 2)))[0]
+    print 'len', len(x)
 
 
 if __name__ == '__main__':
