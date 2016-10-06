@@ -10,6 +10,7 @@ import click
 # logging.basicConfig()
 #
 # log = logging.getLogger("")
+FINAL_FILENAME = 'main.h5'
 
 class Hit(enum.Enum):
     open = 0
@@ -293,6 +294,13 @@ class BucketsRow(object):
         # row
         self.pins = groups
 
+    def overlapping(self):
+        boundaries = []
+        for inp, outputs in self.mapping.items():
+            if len(outputs) > 1:
+                boundaries.append(inp)
+        return boundaries
+
 
 class BoxFactory(object):
     def __init__(self, rv, buckets=None):
@@ -353,6 +361,13 @@ class Box(object):
         self.ident = ident
         self.layout = layout
 
+    def total_pins(self):
+        tot = 0
+        for r in self.rows:
+            if not isinstance(r, BucketsRow):
+                tot += r.pins.sum()
+        return tot
+
     def _generate_paths(self, rows, pos, prob, cur=0):
         """A recursive generator that traces the path through each layer"""
         if cur == len(rows):
@@ -377,11 +392,30 @@ class Box(object):
         return buckets
 
     def dump(self):
-        print '---'
-        for r in self.layout:
-            print r.pins
-            print
-        print '---'
+        """Print a picture of it to the console"""
+        if self.factory.buckets:
+            rows = self.layout[:-1]
+        else:
+            rows = self.layout
+        
+        print('---' * len(rows[0].pins))
+
+        for r in rows:
+            text = "".join([(' - ', ' 0 ')[p] for p in r.pins])
+            print("   " * len(r.pins))
+            print(text)
+            print("   " * len(r.pins))
+
+        if self.factory.buckets:
+            buck_row = self.layout[-1]
+            bound = buck_row.overlapping()
+            keys = np.zeros(buck_row.pin_count, int)
+            keys[bound] = 1
+            text = "".join([('   ', ' | ')[b] for b in keys])
+            print(text)
+            print(text)
+
+        print('---' * len(r.pins))
 
     def dump_tikz(self):
         if self.factory.buckets:
@@ -706,7 +740,7 @@ def save_box_main():
     click.echo('Creating factory...')
     factory = box_15_5_c_factory()
     click.echo('Maximum Boxes = {}'.format(factory.calc_maximum_boxes()))
-    db = Database('main.h5', factory, [3, 11])
+    db = Database(FINAL_FILENAME, factory, [3, 11])
     db.save_all()
 
 
@@ -722,35 +756,10 @@ def quantify(rows, pins, few):
     print len(rf.all_rows) ** rows
 
 
-@waddington.command()
-def test_2():
-    print 'here'
-    # factory = box_15_5_a_factory()
-    db = Database('15_5_a.h5')
-    f = db.factory
-    print db.distributions
-    print f
-    # db._resave_old()
-    # data = db.read_all()
-    # print len(data)
-    # dist = data['dist']
-    # tups = set([tuple(d.ravel()) for d in dist])
-    # print len(tups)
-    # print shorter
-    # print shorter[:,1,2:]
-    # print shorter[:,0,:2]
-    # short
-    # match = [[0, 0, 0, 0], [0, 0, 0, 0]]
-    # matching = (shorter == match)
-    # m = matching.sum(axis=2).sum(axis=1)
-    # ind = np.where(m==8)[0]
-    # print ind
-    # print shorter[ind[0]]
-    # print factory.construct_from_db(data[ind[0]]).dump()
     
 @waddington.command()
 def analysis():
-    db = Database('main.h5')
+    db = Database(FINAL_FILENAME)
     db.save_mapping()
     return 
 
@@ -782,7 +791,7 @@ def analysis():
             
 @waddington.command(help="Show general info about the Box")
 def describe():
-    db = Database('main.h5')
+    db = Database(FINAL_FILENAME)
     dst = Distribution(db)
     desc = []
 
@@ -806,7 +815,7 @@ def describe():
         print("{0:>25}: {1:<8,}".format(text, val))
 
 def find_dist():
-    db = Database('main.h5')
+    db = Database(FINAL_FILENAME)
     find = [[0, 0, 1, 0],[0, 1, 0, 0]]
     q = db.dists
     x = np.where(np.all(q == find, axis=(1, 2)))[0]
@@ -835,7 +844,7 @@ def find_dist():
         #     bar.update(1)
         
 def high_ent():
-    db = Database('main.h5')
+    db = Database(FINAL_FILENAME)
     q = db.dists
     log2 = -np.log2(q)
     log2_clean = np.nan_to_num(log2)
@@ -852,7 +861,6 @@ def high_ent():
         box.dump_tikz()
         print '==================='
 
-
 def big():
     db = Database('15_6_a.h5')
     find = [[0, 0, 1, 0],[0, 0, 0, 1]]
@@ -861,11 +869,24 @@ def big():
     print 'len', len(x)
 
 
+def test():
+    db = Database(FINAL_FILENAME)
+    target = [[0, 1, 0, 0],[0, 0, 1, 0]]
+    found = np.where(np.all(db.dists == target, axis=(1, 2)))[0]
+    print len(found)
+    for a in found:
+        box = db.factory.from_ident(db.ids[a])
+        box.dump()
+        print db.dists[a]
+        break
+        # box.dump_tikz()
+
+
 if __name__ == '__main__':
     # find_dist()
     # high_ent()
-    waddington()
-    # test()
+    # waddington()
+    test()
     # test_box_15_5_a()
     # save_box_15_5_b()
     # save_box_15_5_a()
