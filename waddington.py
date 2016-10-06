@@ -1,11 +1,13 @@
 """
 """
+from __future__ import print_function
 import numpy as np
 import itertools
 import os
 import enum
 import tables
 import click
+from tabulate import tabulate
 # import logging
 # logging.basicConfig()
 #
@@ -189,11 +191,9 @@ class RowFactory(object):
 
 
 class SpacedRowFactory(RowFactory):
-    def __init__(self, size, few=True):
+    def __init__(self, size):
         self.size = size
         self.minimum_pins = self.size // 4
-        if few == True:
-            self.minimum_pins -= 1
 
     def is_valid_layer(self, pins):
         # Test 1: at least size/4 pins
@@ -363,7 +363,7 @@ class Box(object):
 
     def total_pins(self):
         tot = 0
-        for r in self.rows:
+        for r in self.layout:
             if not isinstance(r, BucketsRow):
                 tot += r.pins.sum()
         return tot
@@ -391,20 +391,34 @@ class Box(object):
 
         return buckets
 
-    def dump(self):
+    def dump(self, positions=None):
         """Print a picture of it to the console"""
         if self.factory.buckets:
             rows = self.layout[:-1]
         else:
             rows = self.layout
-        
-        print('---' * len(rows[0].pins))
+
+        beg = "| "
+        end = " |"
+
+        r1 = rows[0].pins
+        width = len(r1) * 3 + len(beg) + len(end) + 2
+        print("=" * width)
+        print(str(self.ident).center(width))
+
+        if positions:
+            keys = np.zeros(len(r1), int)
+            keys[positions] = 1
+            text = "".join([('---', '   ')[b] for b in keys])
+            print(beg, text, end)
+        else:
+            print(beg, '---' * len(r1), end)
 
         for r in rows:
-            text = "".join([(' - ', ' 0 ')[p] for p in r.pins])
-            print("   " * len(r.pins))
-            print(text)
-            print("   " * len(r.pins))
+            text = "".join([(' - ', '(0)')[p] for p in r.pins])
+            print(beg, "   " * len(r.pins), end)
+            print(beg, text, end)
+            print(beg, "   " * len(r.pins), end)
 
         if self.factory.buckets:
             buck_row = self.layout[-1]
@@ -412,12 +426,19 @@ class Box(object):
             keys = np.zeros(buck_row.pin_count, int)
             keys[bound] = 1
             text = "".join([('   ', ' | ')[b] for b in keys])
-            print(text)
-            print(text)
+            print(beg, text, end)
 
-        print('---' * len(r.pins))
+        print(beg, '---' * len(r.pins), end)
 
-    def dump_tikz(self):
+        if positions:
+            dists = self.get_distribution(positions)
+            rows = [['Slot {}'.format(i + 1)] + list(vals) 
+                    for (i, vals) in enumerate(dists)]
+            headers=["Buck {}".format(i + 1) for i in range(dists.shape[1])]
+            print(tabulate(rows, headers=headers))
+        print("=" * width)
+
+    def dump_tikz(self, positions=None):
         if self.factory.buckets:
             ll = self.layout[:-1]
         else:
@@ -426,7 +447,7 @@ class Box(object):
         offx = 1
         offy = 2.5
         beg = r"\draw[fill]"
-        end = r"circle (.1cm);"
+        end = r"circle (.18cm);"
         
         for i, r in enumerate(reversed(ll)):
             for j, p in enumerate(r.pins):
@@ -690,6 +711,19 @@ def box_9_4_a_factory():
     return BoxFactory(rv, b)
 
 
+def boxes_with_max_pins(db, found):
+    best = []
+    max_pins = 0
+    for index in found:
+        box = db.factory.from_ident(db.ids[index])
+        p = box.total_pins()
+        if p > max_pins:
+            best = [box]
+            max_pins = p
+        elif p == max_pins:
+            best.append(box)
+
+    return best
 # ---------------------------------------------------------------------------
 # Commands below here
 #
@@ -742,52 +776,16 @@ def save_box_main():
     click.echo('Maximum Boxes = {}'.format(factory.calc_maximum_boxes()))
     db = Database(FINAL_FILENAME, factory, [3, 11])
     db.save_all()
+    db.save_mapping()
 
 
 @waddington.command()
 @click.argument('rows', default=4)
 @click.argument('pins', default=15)
-@click.option('--few', is_flag=True)
-# @click.option('--top', type=int, default=0)
-def quantify(rows, pins, few):
-    # if top:
-    #     top = TopRowFactory(pins, 
-    rf = SpacedRowFactory(pins, few)
-    print len(rf.all_rows) ** rows
+def quantify(rows, pins):
+    rf = SpacedRowFactory(pins)
+    print(len(rf.all_rows) ** rows)
 
-
-    
-@waddington.command()
-def analysis():
-    db = Database(FINAL_FILENAME)
-    db.save_mapping()
-    return 
-
-    print db.factory
-    print len(db.dists)
-
-    # with click.progressbar(db.data) as boxes:
-    #     for b in boxes:
-    for b in db.data:
-        d = b['dist']
-        ident = b['ident']
-        if d[0][0] == 1.0:
-            if d[1][2] == 1.0:
-                print d
-                box = db.factory.from_ident(ident)
-                box.dump()
-        # if d[0][2] == 1.0:
-        #     if d[1][2] == 1.0:
-        #         print d
-        #         box = db.factory.construct_from_db(b)
-        #         box.dump()
-        # if d[0][0] == 0.75:
-        #     if d[0][1] == 0.25:
-        #         if d[1][2] == 0.25:
-        #             if d[1][3] == 0.75:
-        #                 print d
-        #                 box = db.factory.construct_from_db(b)
-        #                 box.dump()
             
 @waddington.command(help="Show general info about the Box")
 def describe():
@@ -814,79 +812,65 @@ def describe():
     for text, val in desc:
         print("{0:>25}: {1:<8,}".format(text, val))
 
-def find_dist():
-    db = Database(FINAL_FILENAME)
-    find = [[0, 0, 1, 0],[0, 1, 0, 0]]
-    q = db.dists
-    x = np.where(np.all(q == find, axis=(1, 2)))[0]
-    print 'len', len(x)
-    # for a in x:
-    #     box = db.factory.from_ident(db.ids[a])
-    #     box.dump()
-        # if box.layout[0].pins.sum() != 2:
-        #     continue
-        # for row in box.layout[1:-1]:
-        #     if row.pins.sum() != 4:
-        #         break
-        # else:
-        #     print 'found'
-            # box.dump()
-            # print db.dists[a]
-
-
-    # with click.progressbar(label="Find", length=len(db.data)) as bar:
-        # for i, dist in enumerate(self.dists):
-        #     flat = tuple(dist.ravel())
-        #     grp = group_dict.setdefault(flat, next_group)
-        #     if grp == next_group:
-        #         next_group += 1
-        #     arr[i] = grp
-        #     bar.update(1)
         
-def high_ent():
+@waddington.command()
+def find_lattice():
     db = Database(FINAL_FILENAME)
     q = db.dists
-    log2 = -np.log2(q)
-    log2_clean = np.nan_to_num(log2)
-    pmi = q * log2_clean
+
+    # Find the high entropy distributions
+    errs = np.seterr(divide='ignore')
+    pmi = q * np.where(q == 0, 0, -np.log2(q))
+    np.seterr(**errs)
+
+    # Sum across layout and find the max
     summed = pmi.sum(axis=(1,2))
     mx = summed.max()
-    wh = np.where(summed == mx)[0]
-    print len(wh)
-    for a in wh:
-        print a
-        print db.dists[a]
-        box = db.factory.from_ident(db.ids[a])
-        box.dump()
-        box.dump_tikz()
-        print '==================='
+    found = np.where(summed == mx)[0]
+    print("Found {} high entropy layouts".format(len(found)))
 
-def big():
-    db = Database('15_6_a.h5')
-    find = [[0, 0, 1, 0],[0, 0, 0, 1]]
-    q = db.dists
-    x = np.where(np.all(q == find, axis=(1, 2)))[0]
-    print 'len', len(x)
+    best = boxes_with_max_pins(db, found)
+    print("Filtered to {} layouts with most pins".format(len(best)))
+
+    # Grab the one with pins below the slots
+    for b in best:
+        top_row = b.layout[0].pins
+        if top_row[db.positions[0]] and top_row[db.positions[1]]:
+            b.dump(db.positions)
 
 
-def test():
+def find_pattern(target):
     db = Database(FINAL_FILENAME)
-    target = [[0, 1, 0, 0],[0, 0, 1, 0]]
     found = np.where(np.all(db.dists == target, axis=(1, 2)))[0]
-    print len(found)
-    for a in found:
-        box = db.factory.from_ident(db.ids[a])
-        box.dump()
-        print db.dists[a]
-        break
-        # box.dump_tikz()
+    print("Found {} candidate layouts".format(len(found)))
+    best = boxes_with_max_pins(db, found)
+    print("Filtered to {} layouts with most pins".format(len(best)))
+    for b in best:
+        b.dump(db.positions)
 
+@waddington.command()
+def find_splitfun():
+    target = [[0, 1, 0, 0],[0, 0, 1, 0]]
+    find_pattern(target)
+
+@waddington.command()
+def find_split():
+    target = [[0.5, 0.5, 0, 0],[0, 0, 0.5, 0.5]]
+    find_pattern(target)
+
+@waddington.command()
+def find_funnel():
+    target = [[0, 0, 1, 0],[0, 0, 1, 0]]
+    find_pattern(target)
 
 if __name__ == '__main__':
+    # find_split()
+    # test()
+    # find_lattice()
     # find_dist()
     # high_ent()
-    # waddington()
-    test()
+    waddington()
+    # test()
     # test_box_15_5_a()
     # save_box_15_5_b()
     # save_box_15_5_a()
