@@ -1,5 +1,3 @@
-"""
-"""
 from __future__ import print_function
 import numpy as np
 import itertools
@@ -449,6 +447,15 @@ class Box(object):
                     for (i, vals) in enumerate(dists)]
             headers = ["Buck {}".format(i + 1) for i in range(dists.shape[1])]
             print(tabulate(rows, headers=headers))
+
+            # Now print entropies / MI
+            pr = dists / 2.0
+            ent_p_b = calc_entropy(pr)
+            ent_b = round(calc_entropy(pr.sum(axis=0)), 3)
+            mi = round(1.0 + ent_b - ent_p_b, 3)
+            print()
+            print("H(S) = 1.0 / H(B) = {} / I(S; B) = {}".format(ent_b, mi).center(width))
+
         print("=" * width)
 
     def dump_tikz(self, positions=None):
@@ -475,10 +482,12 @@ class Box(object):
         dists = self.get_distribution(positions)
         pr = r"\node [number] at "
         for i in range(4):
-            print("{}({}, -0.8) {{${}$}};".format(pr,
-                                                  i * 2 + 1.5, dists[0, i]))
-            print("{}({}, -1.7) {{${}$}};".format(pr,
-                                                  i * 2 + 1.5, dists[1, i]))
+            print("{}({}, -0.8) {{${}$}};".format(
+                pr,
+                i * 2 + 1.5, dists[0, i]))
+            print("{}({}, -1.7) {{${}$}};".format(
+                pr,
+                i * 2 + 1.5, dists[1, i]))
 
 
 class FileExistsError(click.ClickException):
@@ -512,7 +521,9 @@ class Database(object):
         self.positions = attrs.positions
         self.data = h5.root.output[:]
         self.dists = self.data['dist']
+        assert isinstance(self.dists, np.ndarray)
         self.ids = self.data['ident']
+        assert isinstance(self.ids, np.ndarray)
 
         if hasattr(h5.root, 'mapping'):
             self.mapping = h5.root.mapping[:]
@@ -588,6 +599,21 @@ class Database(object):
         ident = self.ids[index]
         return self.factory.from_ident(ident, index=index)
 
+def calc_entropy(arr):
+    # Extract the numpy array, and just treat it as flat. Then do the
+    # standard information calculation (base 2). Deal with zeros by simply
+    # cleaning up after.
+    #
+    q = arr.ravel()
+
+    # Wrap this by ignoring warnings
+    old_err = np.seterr(divide='ignore')
+    log2 = np.where(q == 0, 0, -np.log2(q))
+    # Reset warnings
+    np.seterr(**old_err)
+
+    return (q * log2).sum()
+
 
 class Distribution(object):
     """Calculate some basic Info-theoretic measures on the distribution
@@ -597,8 +623,8 @@ class Distribution(object):
     """
 
     def __init__(self, db):
-        assert isinstance(db.dists, np.ndarray)
-        assert isinstance(db.mapping, np.ndarray)
+        # assert isinstance(db.dists, np.ndarray)
+        # assert isinstance(db.mapping, np.ndarray)
         assert len(db.dists.shape) == 3
         self.dists = db.dists.copy()
         self.mapping = db.mapping.copy()
@@ -622,23 +648,19 @@ class Distribution(object):
         # 1 = S (slots)
         # 2 = B (buckets)
 
-        # Wrap this by ignoring warnings
-        old_err = np.seterr(divide='ignore')
 
         self.p_ent = np.log2(self.shape[0])
         self.s_ent = np.log2(self.shape[1])
 
         self.b_dist = self.dists.sum(axis=0).sum(axis=0)
-        self.b_ent = self._calc_entropy(self.b_dist)
+        self.b_ent = calc_entropy(self.b_dist)
 
         self.p_b_dist = self.dists.sum(axis=1)
-        self.p_b_ent = self._calc_entropy(self.p_b_dist)
+        self.p_b_ent = calc_entropy(self.p_b_dist)
 
         self.s_b_dist = self.dists.sum(axis=0)
-        self.s_b_ent = self._calc_entropy(self.s_b_dist)
+        self.s_b_ent = calc_entropy(self.s_b_dist)
 
-        # Reset warnings
-        np.seterr(**old_err)
 
     def _calc_mapping(self):
         """The entropy of the mapping
@@ -663,14 +685,6 @@ class Distribution(object):
     def specificity_p_for_mapping(self):
         return self.p_m_spec
 
-    @staticmethod
-    def _calc_entropy(arr):
-        # Extract the numpy array, and just treat it as flat. Then do the
-        # standard information calculation (base 2). Deal with zeros by simply
-        # cleaning up after.
-        q = arr.ravel()
-        log2 = np.where(q == 0, 0, -np.log2(q))
-        return (q * log2).sum()
 
 
 def box_15_5_a_factory():
@@ -764,6 +778,8 @@ def boxes_with_max_pins(db, found):
 
 @click.group()
 def waddington():
+    """A Python Implementation of a 'Waddington Box'
+    """
     pass
 
 
@@ -823,6 +839,8 @@ def save_box_main():
 @click.argument('rows', default=4)
 @click.argument('pins', default=15)
 def quantify(rows, pins):
+    """Calculate upper limit on the number of boxes given row and pin counts
+    """
     rf = SpacedRowFactory(pins)
     print(len(rf.all_rows) ** rows)
 
@@ -906,7 +924,7 @@ def find_split():
         box = db.from_index(ind)
         frow = box.layout[0].pins
         if box.layout[-2].pins.sum() == 3 and \
-                frow[db.positions[0]+1] and frow[db.positions[1]-1]:
+                frow[db.positions[0]] and frow[db.positions[1]]:
             best.append(box)
     print("Filtered to {} candidate layouts".format(len(best)))
     for b in best:
@@ -920,23 +938,68 @@ def find_funnel():
 
 @waddington.command()
 def find_almost_switch():
-    target = [[1, 0, 0, 0], [0, 0, .9375, .0625]]
+    # target = [[0.0, 0.75, .25, 0], [0, 0.25, 0.75, 0]]
+    # target = [[0.0, 0.75, .25, 0], [0, 0.75, 0.25, 0]]
+    # target = [[0.5, 0.25, .25, 0], [0, 0.25, 0.25, 0.5]]
+    target = [[1, 0, 0, 0], [0, 1, 0, 0]]
     find_pattern(target)
 
-@waddington.command(help="Show the layout and distribution given an index")
-@click.argument('index', type=int)
+@waddington.command()
+@click.argument('index', type=int, default=-1)
 def show(index):
+    """Show the layout and distribution given an index. If you don't specify
+    an index, and random one will be selected.
+    """
     db = Database(FINAL_FILENAME)
+    if index == -1:
+        index = np.random.randint(0, len(db.dists)-1)
     box = db.from_index(index)
     box.dump(db.positions)
 
 
-@waddington.command(help="Output a tikz fragment given an index")
+@waddington.command()
 @click.argument('index', type=int)
 def tikz(index):
+    """Output a tikz fragment given an index"""
     db = Database(FINAL_FILENAME)
     box = db.from_index(index)
     box.dump_tikz(db.positions)
+
+@waddington.command()
+def test():
+    """Do some test operation"""
+    errs = np.seterr(all='ignore')
+    db = Database(FINAL_FILENAME)
+    q = db.data['dist'] 
+    assert isinstance(q, np.ndarray)
+    over_b = q.sum(axis=1) / 2.0
+
+    log_b = np.where(over_b == 0, 0, over_b * -np.log2(over_b))
+    ent_b = log_b.sum(axis=1)
+
+    pmi = q * np.where(q == 0, 0, -np.log2(q))
+    ent_p_b = pmi.sum(axis=(1, 2))
+    spec = ent_b + 1.0 - ent_p_b
+
+    print(log_b[0], ent_p_b[0], spec[0])
+
+    # print(ent_b.shape)
+    print(ent_b.max())
+    print(spec.max())
+
+    # found = np.where(ent_b == 2.0)[0]
+    # print(len(found))
+    # box = db.from_index(found[0])
+    # box.dump(db.positions)
+    # print(ent_s.max())
+
+    # zeros = (q == 0)
+
+    # Find the high entropy distributions
+    # pmi = q * np.where(q == 0, 0, -np.log2(q))
+    np.seterr(**errs)
+
+
 
 if __name__ == '__main__':
     waddington()
