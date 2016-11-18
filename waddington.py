@@ -9,6 +9,7 @@ from tabulate import tabulate
 
 
 FINAL_FILENAME = 'main.h5'
+SMALL_FILENAME = 'small.h5'
 
 
 class Hit(enum.Enum):
@@ -293,7 +294,7 @@ class BucketsRow(object):
 
         self.mapping = map_b
 
-        # TODO: This is rubbish. But it allows us to print the pins on every
+        # FIXME: This is rubbish. But it allows us to print the pins on every
         # row
         self.pins = groups
 
@@ -527,6 +528,8 @@ class Database(object):
 
         if hasattr(h5.root, 'mapping'):
             self.mapping = h5.root.mapping[:]
+        if hasattr(h5.root, 'mapping2'):
+            self.mapping2 = h5.root.mapping2[:]
         h5.close()
 
     def save_mapping(self):
@@ -551,6 +554,30 @@ class Database(object):
         # Save the mapping classes
         h5 = tables.open_file(self.fname, 'r+')
         h5.create_array('/', 'mapping', arr)
+        h5.close()
+
+    def save_mapping2(self):
+        assert hasattr(self, 'data')
+        assert not hasattr(self, 'mapping2')
+
+        arr = np.zeros(len(self.data), dtype=int)
+        next_group = 1
+        group_dict = {}
+        with click.progressbar(label="Mapping 2", length=len(self.data)) as bar:
+            for i, dist in enumerate(self.dists):
+                flat = tuple(dist.sum(axis=0).ravel())
+                grp = group_dict.setdefault(flat, next_group)
+                if grp == next_group:
+                    next_group += 1
+                arr[i] = grp
+                bar.update(1)
+
+        # Start the groupings at 0
+        arr -= 1
+
+        # Save the mapping classes
+        h5 = tables.open_file(self.fname, 'r+')
+        h5.create_array('/', 'mapping2', arr)
         h5.close()
 
     def _resave_old(self):
@@ -599,11 +626,13 @@ class Database(object):
         ident = self.ids[index]
         return self.factory.from_ident(ident, index=index)
 
+
 def calc_entropy(arr):
-    # Extract the numpy array, and just treat it as flat. Then do the
-    # standard information calculation (base 2). Deal with zeros by simply
-    # cleaning up after.
-    #
+    """
+    Extract the numpy array, and just treat it as flat. Then do the
+    standard information calculation (base 2). Deal with zeros by simply
+    cleaning up after.
+    """
     q = arr.ravel()
 
     # Wrap this by ignoring warnings
@@ -648,7 +677,6 @@ class Distribution(object):
         # 1 = S (slots)
         # 2 = B (buckets)
 
-
         self.p_ent = np.log2(self.shape[0])
         self.s_ent = np.log2(self.shape[1])
 
@@ -660,7 +688,6 @@ class Distribution(object):
 
         self.s_b_dist = self.dists.sum(axis=0)
         self.s_b_ent = calc_entropy(self.s_b_dist)
-
 
     def _calc_mapping(self):
         """The entropy of the mapping
@@ -686,39 +713,10 @@ class Distribution(object):
         return self.p_m_spec
 
 
-
-def box_15_5_a_factory():
-    # The basic box for the paper
-    rf = SpacedRowFactory(15, False)
-    rv = [rf.all_rows] * 5
-    bk = BucketsRow(15, [
-        (0, 1, 2, 3),
-        (3, 4, 5, 6, 7),
-        (7, 8, 9, 10, 11),
-        (11, 12, 13, 14),
-    ])
-    bf = BoxFactory(rv, bk)
-    return bf
-
-
-def box_15_5_b_factory():
-    # The basic box for the paper
-    rf = SpacedRowFactory(15, True)
-    rv = [rf.all_rows] * 5
-    bk = BucketsRow(15, [
-        (0, 1, 2, 3),
-        (3, 4, 5, 6, 7),
-        (7, 8, 9, 10, 11),
-        (11, 12, 13, 14),
-    ])
-    bf = BoxFactory(rv, bk)
-    return bf
-
-
-def box_15_5_c_factory():
+def box_15_5_factory():
     # The basic box for the paper
     tf = TopRowFactory(15, [3, 11])
-    rf = SpacedRowFactory(15, False)
+    rf = SpacedRowFactory(15)
     rv = [tf.all_rows]
     rv.extend([rf.all_rows] * 4)
     bk = BucketsRow(15, [
@@ -731,24 +729,8 @@ def box_15_5_c_factory():
     return bf
 
 
-def box_15_6_a_factory():
-    # The basic box for the paper
-    tf = TopRowFactory(15, [3, 11])
-    rf = SpacedRowFactory(15, False)
-    rv = [tf.all_rows]
-    rv.extend([rf.all_rows] * 5)
-    bk = BucketsRow(15, [
-        (0, 1, 2, 3),
-        (3, 4, 5, 6, 7),
-        (7, 8, 9, 10, 11),
-        (11, 12, 13, 14),
-    ])
-    bf = BoxFactory(rv, bk)
-    return bf
-
-
-def box_9_4_a_factory():
-    rf = SpacedRowFactory(9, False)
+def box_9_4_factory():
+    rf = SpacedRowFactory(9)
     rv = [rf.all_rows] * 4
     b = BucketsRow(9, [
         (0, 1, 2),
@@ -784,65 +766,24 @@ def waddington():
 
 
 @waddington.command()
-def save_box_9_4_a():
+def generate_small():
+    """Make a small 9x4 database of boxes"""
     click.echo('Creating factory')
-    factory = box_9_4_a_factory()
-    db = Database('9_4_a.h5', factory, [4])
-    db.save_all()
-
-
-@waddington.command()
-def save_box_15_5_a():
-    click.echo('Creating factory...')
-    factory = box_15_5_a_factory()
+    factory = box_9_4_factory()
     click.echo('Maximum Boxes = {}'.format(factory.calc_maximum_boxes()))
-    # db = Database('15_5_a.h5', factory, [3, 11])
-    # db.save_all()
-
-
-@waddington.command()
-def save_box_15_5_b():
-    click.echo('Creating factory')
-    factory = box_15_5_b_factory()
-    db = Database('15_5_b.h5', factory, [3, 11])
+    db = Database(SMALL_FILENAME, factory, [4])
     db.save_all()
 
 
 @waddington.command()
-def save_box_15_5_c(overwrite):
+def generate_main():
+    """Create all boxes for paper and save in a database"""
     click.echo('Creating factory...')
-    factory = box_15_5_c_factory()
-    click.echo('Maximum Boxes = {}'.format(factory.calc_maximum_boxes()))
-    db = Database('15_5_c.h5', factory, [3, 11], overwrite)
-    db.save_all()
-
-
-@waddington.command()
-def save_box_15_6_a():
-    click.echo('Creating factory')
-    factory = box_15_6_a_factory()
-    db = Database('15_6_a.h5', factory, [3, 11])
-    db.save_all()
-
-
-@waddington.command()
-def save_box_main():
-    click.echo('Creating factory...')
-    factory = box_15_5_c_factory()
+    factory = box_15_5_factory()
     click.echo('Maximum Boxes = {}'.format(factory.calc_maximum_boxes()))
     db = Database(FINAL_FILENAME, factory, [3, 11])
     db.save_all()
     db.save_mapping()
-
-
-@waddington.command()
-@click.argument('rows', default=4)
-@click.argument('pins', default=15)
-def quantify(rows, pins):
-    """Calculate upper limit on the number of boxes given row and pin counts
-    """
-    rf = SpacedRowFactory(pins)
-    print(len(rf.all_rows) ** rows)
 
 
 @waddington.command(help="Show general info about the Box")
@@ -862,6 +803,8 @@ def describe():
     push("Unconstrained Layouts", unconst_layouts)
     push("Constrained Layouts", db.factory.calc_maximum_boxes())
     push("Actual Layouts", len(db.data))
+    push("Possible Top Rows", len(db.factory.possible_rows[0]))
+    push("Possible Other Rows", len(db.factory.possible_rows[1]))
     push("Number of Mappings", map_count)
     push("Spec Slots for Buckets", dst.specificity_s_for_b)
     push("Spec Pins for Buckets", dst.specificity_p_for_b)
@@ -873,6 +816,10 @@ def describe():
 
 @waddington.command()
 def find_lattice():
+    """Find lattice-like boxes"""
+
+    # We look look for ones with the highest entropy...
+    #
     db = Database(FINAL_FILENAME)
     q = db.dists
 
@@ -908,13 +855,15 @@ def find_pattern(target):
 
 
 @waddington.command()
-def find_splitfun():
+def find_switch():
+    """Find switch-like boxes"""
     target = [[0, 1, 0, 0], [0, 0, 1, 0]]
     find_pattern(target)
 
 
 @waddington.command()
 def find_split():
+    """Find split boxes"""
     db = Database(FINAL_FILENAME)
     target = [[0.5, 0.5, 0, 0], [0, 0, 0.5, 0.5]]
     found = np.where(np.all(db.dists == target, axis=(1, 2)))[0]
@@ -933,26 +882,21 @@ def find_split():
 
 @waddington.command()
 def find_funnel():
+    """Find funnel-like boxes"""
     target = [[0, 0, 1, 0], [0, 0, 1, 0]]
     find_pattern(target)
 
-@waddington.command()
-def find_almost_switch():
-    # target = [[0.0, 0.75, .25, 0], [0, 0.25, 0.75, 0]]
-    # target = [[0.0, 0.75, .25, 0], [0, 0.75, 0.25, 0]]
-    # target = [[0.5, 0.25, .25, 0], [0, 0.25, 0.25, 0.5]]
-    target = [[1, 0, 0, 0], [0, 1, 0, 0]]
-    find_pattern(target)
 
 @waddington.command()
 @click.argument('index', type=int, default=-1)
 def show(index):
-    """Show the layout and distribution given an index. If you don't specify
-    an index, and random one will be selected.
+    """
+    Show the layout and distribution given an index. If you don't specify an
+    index, and randoet standard formatting"r one will be selected.
     """
     db = Database(FINAL_FILENAME)
     if index == -1:
-        index = np.random.randint(0, len(db.dists)-1)
+        index = np.random.randint(0, len(db.dists) - 1)
     box = db.from_index(index)
     box.dump(db.positions)
 
@@ -965,41 +909,66 @@ def tikz(index):
     box = db.from_index(index)
     box.dump_tikz(db.positions)
 
-@waddington.command()
-def test():
-    """Do some test operation"""
-    errs = np.seterr(all='ignore')
-    db = Database(FINAL_FILENAME)
-    q = db.data['dist'] 
-    assert isinstance(q, np.ndarray)
-    over_b = q.sum(axis=1) / 2.0
 
-    log_b = np.where(over_b == 0, 0, over_b * -np.log2(over_b))
-    ent_b = log_b.sum(axis=1)
+# UNUSED BUT INTERESTING ----------------------------------------------------
 
-    pmi = q * np.where(q == 0, 0, -np.log2(q))
-    ent_p_b = pmi.sum(axis=(1, 2))
-    spec = ent_b + 1.0 - ent_p_b
-
-    print(log_b[0], ent_p_b[0], spec[0])
-
-    # print(ent_b.shape)
-    print(ent_b.max())
-    print(spec.max())
-
-    # found = np.where(ent_b == 2.0)[0]
-    # print(len(found))
-    # box = db.from_index(found[0])
-    # box.dump(db.positions)
-    # print(ent_s.max())
-
-    # zeros = (q == 0)
-
-    # Find the high entropy distributions
-    # pmi = q * np.where(q == 0, 0, -np.log2(q))
-    np.seterr(**errs)
+# @waddington.command()
+# def find_almost_switch():
+#     # target = [[0.0, 0.75, .25, 0], [0, 0.25, 0.75, 0]]
+#     # target = [[0.0, 0.75, .25, 0], [0, 0.75, 0.25, 0]]
+#     # target = [[0.5, 0.25, .25, 0], [0, 0.25, 0.25, 0.5]]
+#     target = [[1, 0, 0, 0], [0, 1, 0, 0]]
+#     find_pattern(target)
+#
+# @waddington.command()
+# def save_mapping2():
+#     db = Database(FINAL_FILENAME)
+#     db.save_mapping2()
 
 
+# @waddington.command()
+# @click.argument('rows', default=4)
+# @click.argument('pins', default=15)
+# def quantify(rows, pins):
+#     """Calculate upper limit on the number of boxes given row and pin counts
+#     """
+#     rf = SpacedRowFactory(pins)
+#     print(len(rf.all_rows) ** rows)
+
+# @waddington.command()
+# def testing_stuff():
+#     """Do some test operation"""
+#     errs = np.seterr(all='ignore')
+#     db = Database(FINAL_FILENAME)
+#     q = db.data['dist']
+#     assert isinstance(q, np.ndarray)
+#     over_b = q.sum(axis=1) / 2.0
+#
+#     log_b = np.where(over_b == 0, 0, over_b * -np.log2(over_b))
+#     ent_b = log_b.sum(axis=1)
+#
+#     pmi = q * np.where(q == 0, 0, -np.log2(q))
+#     ent_p_b = pmi.sum(axis=(1, 2))
+#     spec = ent_b + 1.0 - ent_p_b
+#
+#     print(log_b[0], ent_p_b[0], spec[0])
+#
+#     # print(ent_b.shape)
+#     print(ent_b.max())
+#     print(spec.max())
+#
+#     np.seterr(**errs)
+#
+# @waddington.command()
+# def map2():
+#     db = Database(FINAL_FILENAME)
+#     map_count = len(np.unique(db.mapping2))
+#     print(map_count)
+#     bins = np.bincount(db.mapping2)
+#     # Normalise
+#     probs = bins.astype(float) / bins.sum()
+#     p_m_spec = (probs * -np.log2(probs)).sum()
+#     print(p_m_spec)
 
 if __name__ == '__main__':
     waddington()
