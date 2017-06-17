@@ -3,7 +3,9 @@ The Waddington Box
 ==================
 
 A Waddington box is a simulated mechanical version of Waddington's landscape
-metaphor.
+metaphor. The model is used in the publication `Causal Specificity and the Instructive-Permissive Distinction`__.
+
+__ https://link.springer.com/article/10.1007/s10539-017-9568-0
 
 .. figure:: balls.png
     :width: 200px
